@@ -10,13 +10,13 @@ Tmux tools for [pi](https://github.com/badlogic/pi-mono) - run long-running comm
 ## Installation
 
 ```bash
-pi install git:github.com/YOUR_USERNAME/pi-tmux
+pi install git:github.com/offline-ant/pi-tmux
 ```
 
 Or try without installing:
 
 ```bash
-pi -e git:github.com/YOUR_USERNAME/pi-tmux
+pi -e git:github.com/offline-ant/pi-tmux
 ```
 
 ## Tools
