@@ -74,7 +74,7 @@ export default function (pi: ExtensionAPI) {
 		name: "tmux-bash",
 		label: "Tmux Bash",
 		description:
-			"Create a new tmux window with the given name and execute a command. Use for long-running processes. The window stays open after the command completes so you can capture output. Requires running inside tmux.",
+			"Create a new tmux window with the given name and execute a command. Use ONLY for long-running processes (servers, watch commands, builds >30s). For quick commands that complete fast, use the regular 'bash' tool instead. The window stays open after the command completes so you can capture output. Requires running inside tmux.",
 		parameters: tmuxBashParams,
 
 		async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
