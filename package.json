@@ -1,0 +1,14 @@
+{
+  "name": "pi-tmux",
+  "version": "1.0.0",
+  "description": "Tmux tools for pi - run long-running commands in tmux windows",
+  "keywords": ["pi-package", "tmux"],
+  "license": "MIT",
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@sinclair/typebox": "*"
+  },
+  "pi": {
+    "extensions": ["./extensions/tmux.ts"]
+  }
+}
