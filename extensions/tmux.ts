@@ -193,7 +193,8 @@ export default function (pi: ExtensionAPI) {
 					};
 				}
 
-				let output = result.stdout;
+				// Strip trailing empty lines
+				let output = result.stdout.replace(/\n+$/, "");
 
 				// Apply truncation
 				const truncation = truncateTail(output, {
