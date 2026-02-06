@@ -35,8 +35,84 @@ function isTmuxAvailable(): boolean {
 	return !!process.env.TMUX;
 }
 
-function windowExists(name: string): boolean {
-	return activeWindows.has(name);
+interface CreateWindowOptions {
+	name: string;
+	command: string;
+	cwd?: string;
+	signal?: AbortSignal;
+}
+
+interface CreateWindowResult {
+	lockName: string | null;
+}
+
+/**
+ * Create a tmux window running bash with a semaphore lock and remain-on-exit.
+ * Uses tmux -e for env and -- bash -c to bypass the default shell.
+ * Throws on failure (cleans up lock automatically).
+ */
+async function createWindow(pi: ExtensionAPI, opts: CreateWindowOptions): Promise<CreateWindowResult> {
+	const { name, command, cwd, signal } = opts;
+
+	if (!isTmuxAvailable()) {
+		throw new TmuxError("Not running inside a tmux session. TMUX env variable not set.", "no_tmux");
+	}
+
+	if (activeWindows.has(name)) {
+		throw new TmuxError(
+			`Window '${name}' already exists. Use tmux-send to send commands, tmux-capture to get output, or tmux-kill to close it first.`,
+			"window_exists",
+		);
+	}
+
+	const lockResult = await createLock(getTmuxLockName(name));
+	const lockName = lockResult?.name ?? null;
+
+	const args = [
+		"new-window", "-n", name, "-d", "-P", "-F", "#{window_id}",
+		"-e", `PI_LOCK_NAME=${sanitizeName(name)}`,
+	];
+	if (cwd) {
+		args.push("-c", cwd);
+	}
+	args.push("--", "bash", "-c", command);
+
+	const result = await pi.exec("tmux", args, { signal });
+
+	if (result.code !== 0) {
+		if (lockName) await releaseLock(lockName);
+		throw new TmuxError(
+			`Error creating tmux window: ${result.stderr || result.stdout}`,
+			"create_failed",
+		);
+	}
+
+	const windowId = result.stdout.trim();
+	await pi.exec("tmux", ["set-option", "-t", windowId, "remain-on-exit", "on"], { signal });
+	activeWindows.set(name, { created: Date.now(), lockName });
+
+	return { lockName };
+}
+
+class TmuxError extends Error {
+	constructor(message: string, public code: string) {
+		super(message);
+	}
+}
+
+function tmuxErrorResult(error: unknown) {
+	if (error instanceof TmuxError) {
+		return {
+			content: [{ type: "text" as const, text: `Error: ${error.message}` }],
+			details: { error: error.code },
+			isError: true as const,
+		};
+	}
+	return {
+		content: [{ type: "text" as const, text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+		details: { error: "exception" },
+		isError: true as const,
+	};
 }
 
 // tmux-bash parameters
@@ -91,68 +167,11 @@ export default function (pi: ExtensionAPI) {
 			"Create a new tmux window with the given name and execute a command. Use ONLY for long-running processes (servers, watch commands, builds >30s). For quick commands that complete fast, use the regular 'bash' tool instead. The window stays open after the command completes so you can capture output. Requires running inside tmux.",
 		parameters: tmuxBashParams,
 
-		async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
-			if (!isTmuxAvailable()) {
-				return {
-					content: [{ type: "text", text: "Error: Not running inside a tmux session. TMUX env variable not set." }],
-					details: { error: "no_tmux" },
-					isError: true,
-				};
-			}
-
+		async execute(_toolCallId, params, signal) {
 			const { name, command } = params;
-
-			// Check if window already exists
-			if (windowExists(name)) {
-				return {
-					content: [
-						{
-							type: "text",
-							text: `Error: Window '${name}' already exists. Use tmux-send to send commands, tmux-capture to get output, or tmux-kill to close it first.`,
-						},
-					],
-					details: { error: "window_exists", name },
-					isError: true,
-				};
-			}
-
 			try {
-				// Create semaphore lock for this tmux window (with automatic deduplication)
-				const baseLockName = getTmuxLockName(name);
-				const lockResult = await createLock(baseLockName);
-				const actualLockName = lockResult?.name ?? null;
-
-				// Create new window with the given name
-				// Use -e for env and -- bash -c to bypass the default shell (e.g. fish)
-				const result = await pi.exec(
-					"tmux",
-					[
-						"new-window", "-n", name, "-d", "-P", "-F", "#{window_id}",
-						"-e", `PI_LOCK_NAME=${sanitizeName(name)}`,
-						"--", "bash", "-c", command || "exec bash",
-					],
-					{ signal },
-				);
-
-				if (result.code !== 0) {
-					// Clean up lock if window creation failed
-					if (actualLockName) {
-						await releaseLock(actualLockName);
-					}
-					return {
-						content: [{ type: "text", text: `Error creating tmux window: ${result.stderr || result.stdout}` }],
-						details: { error: "create_failed", stderr: result.stderr, stdout: result.stdout },
-						isError: true,
-					};
-				}
-
-				// Set remain-on-exit for this window so it stays open after command finishes
-				const windowId = result.stdout.trim();
-				await pi.exec("tmux", ["set-option", "-t", windowId, "remain-on-exit", "on"], { signal });
-
-				activeWindows.set(name, { created: Date.now(), lockName: actualLockName });
-
-				const lockInfo = actualLockName ? ` Lock '${actualLockName}' created.` : "";
+				const { lockName } = await createWindow(pi, { name, command: command || "exec bash", signal });
+				const lockInfo = lockName ? ` Lock '${lockName}' created.` : "";
 				return {
 					content: [
 						{
@@ -160,14 +179,10 @@ export default function (pi: ExtensionAPI) {
 							text: `Created tmux window '${name}' running: ${command || "bash"}${lockInfo}\n\nUse tmux-capture to see output, tmux-send to interact, or tmux-kill to close.`,
 						},
 					],
-					details: { name, command: command || "bash", created: Date.now(), lock: actualLockName },
+					details: { name, command: command || "bash", created: Date.now(), lock: lockName },
 				};
 			} catch (error) {
-				return {
-					content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
-					details: { error: "exception" },
-					isError: true,
-				};
+				return tmuxErrorResult(error);
 			}
 		},
 	});
@@ -406,67 +421,12 @@ export default function (pi: ExtensionAPI) {
 			"After startup, use tmux-send to send tasks and semaphore_wait to wait for completion.",
 		parameters: tmuxCodingAgentParams,
 
-		async execute(_toolCallId, params, signal, onUpdate, _ctx) {
-			if (!isTmuxAvailable()) {
-				return {
-					content: [{ type: "text", text: "Error: Not running inside a tmux session. TMUX env variable not set." }],
-					details: { error: "no_tmux" },
-					isError: true,
-				};
-			}
-
+		async execute(_toolCallId, params, signal, onUpdate) {
 			const { name, folder, piArgs } = params;
-
-			// Check if window already exists
-			if (windowExists(name)) {
-				return {
-					content: [
-						{
-							type: "text",
-							text: `Error: Window '${name}' already exists. Use tmux-kill to close it first, or pick a different name.`,
-						},
-					],
-					details: { error: "window_exists", name },
-					isError: true,
-				};
-			}
+			const piCommand = piArgs ? `pi ${piArgs}` : "pi";
 
 			try {
-				// Create semaphore lock for this tmux window
-				const baseLockName = getTmuxLockName(name);
-				const lockResult = await createLock(baseLockName);
-				const actualLockName = lockResult?.name ?? null;
-
-				// Build the pi command
-				const piCommand = piArgs ? `pi ${piArgs}` : "pi";
-
-				// Create new window — use -e for env, -c for directory, -- bash to bypass default shell
-				const result = await pi.exec(
-					"tmux",
-					[
-						"new-window", "-n", name, "-d", "-P", "-F", "#{window_id}",
-						"-e", `PI_LOCK_NAME=${sanitizeName(name)}`,
-						"-c", folder,
-						"--", "bash", "-c", piCommand,
-					],
-					{ signal },
-				);
-
-				if (result.code !== 0) {
-					if (actualLockName) {
-						await releaseLock(actualLockName);
-					}
-					return {
-						content: [{ type: "text", text: `Error creating tmux window: ${result.stderr || result.stdout}` }],
-						details: { error: "create_failed", stderr: result.stderr, stdout: result.stdout },
-						isError: true,
-					};
-				}
-
-				const windowId = result.stdout.trim();
-				await pi.exec("tmux", ["set-option", "-t", windowId, "remain-on-exit", "on"], { signal });
-
-				activeWindows.set(name, { created: Date.now(), lockName: actualLockName });
+				const { lockName } = await createWindow(pi, { name, command: piCommand, cwd: folder, signal });
 
 				onUpdate?.({
 					content: [{ type: "text", text: `Window '${name}' created. Waiting for pi to start...` }],
@@ -516,7 +476,7 @@ export default function (pi: ExtensionAPI) {
 					output += ` (${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)})]`;
 				}
 
-				const lockInfo = actualLockName ? ` Lock '${actualLockName}' created.` : "";
+				const lockInfo = lockName ? ` Lock '${lockName}' created.` : "";
 				return {
 					content: [
 						{
@@ -524,14 +484,10 @@ export default function (pi: ExtensionAPI) {
 							text: `Pi agent '${name}' started in ${folder}.${lockInfo}\n\nStartup output:\n${output || "(empty)"}\n\nUse tmux-send to send tasks, semaphore_wait to wait for completion.`,
 						},
 					],
-					details: { name, folder, piCommand, lock: actualLockName, created: Date.now() },
+					details: { name, folder, piCommand, lock: lockName, created: Date.now() },
 				};
 			} catch (error) {
-				return {
-					content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
-					details: { error: "exception" },
-					isError: true,
-				};
+				return tmuxErrorResult(error);
 			}
 		},
 	});
