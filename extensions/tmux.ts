@@ -122,8 +122,10 @@ export default function (pi: ExtensionAPI) {
 				const lockResult = await createLock(baseLockName);
 				const actualLockName = lockResult?.name ?? null;
 
-				// Build command with PI_LOCK_NAME env var so spawned pi instances use window name as lock
-				const wrappedCommand = `PI_LOCK_NAME=${sanitizeName(name)} ${command || "bash"}`;
+				// Always run bash explicitly (never the user's default shell) with PI_LOCK_NAME set
+				const wrappedCommand = command
+					? `PI_LOCK_NAME=${sanitizeName(name)} bash -c ${JSON.stringify(command)}`
+					: `PI_LOCK_NAME=${sanitizeName(name)} bash`;
 
 				// Create new window with the given name
 				// Use remain-on-exit so window stays open after command completes
