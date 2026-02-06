@@ -36,11 +36,16 @@ When `tmux-bash` creates a window:
 
 1. **Sets `PI_LOCK_NAME`** - The window name is passed to spawned processes via the `PI_LOCK_NAME` environment variable. If you spawn a pi instance in the window, it will use the window name as its lock name instead of the directory basename.
 
-2. **Creates a `tmux:<name>` lock** - A semaphore lock is created for the tmux window itself. This lock is released when `tmux-kill` is called. If a lock with the same name already exists, a suffix is appended (`tmux:worker-2`, etc.).
+2. **Creates a `tmux:<name>` lock** - A semaphore lock is created for the tmux window itself. This lock is released when the command exits or `tmux-kill` is called. If a lock with the same name already exists, a suffix is appended (`tmux:worker-2`, etc.).
+
+When `tmux-coding-agent` creates a window:
+
+1. **Sets `PI_LOCK_NAME`** - Same as above.
+2. **No `tmux:` lock** - The spawned pi agent creates its own semaphore lock (e.g., name `worker` → lock `worker`). There is no additional `tmux:worker` lock. This avoids confusion about which lock to wait on.
 
 This means you can:
-- `semaphore_wait worker` - Wait for a pi instance running in window "worker"
-- `semaphore_wait tmux:worker` - Wait for the tmux window "worker" to be killed
+- `semaphore_wait worker` - Wait for a pi coding agent in window "worker" to finish processing
+- `semaphore_wait tmux:worker` - Wait for a `tmux-bash` window "worker" to exit
 
 ## Example
 
@@ -56,7 +61,7 @@ To spawn a pi coding agent (single tool call):
 1. Spawn agent: `tmux-coding-agent` with name "worker", folder "../hppr"
 2. Wait for startup output (automatic - waits for >10 lines or 5 seconds)
 3. Send task: `tmux-send` with name "worker" and text "implement feature X"
-4. Wait for completion: `semaphore_wait worker`
+4. Wait for completion: `semaphore_wait` with name "worker" (the agent's lock, NOT "tmux:worker")
 5. Check output: `tmux-capture` with name "worker"
 
 With a specific model:

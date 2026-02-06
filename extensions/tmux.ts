@@ -40,6 +40,8 @@ interface CreateWindowOptions {
 	command: string;
 	cwd?: string;
 	signal?: AbortSignal;
+	/** Skip creating the tmux:<name> lock. Used for coding agents that create their own pi semaphore lock. */
+	skipTmuxLock?: boolean;
 }
 
 interface CreateWindowResult {
@@ -52,7 +54,7 @@ interface CreateWindowResult {
  * Throws on failure (cleans up lock automatically).
  */
 async function createWindow(pi: ExtensionAPI, opts: CreateWindowOptions): Promise<CreateWindowResult> {
-	const { name, command, cwd, signal } = opts;
+	const { name, command, cwd, signal, skipTmuxLock } = opts;
 
 	if (!isTmuxAvailable()) {
 		throw new TmuxError("Not running inside a tmux session. TMUX env variable not set.", "no_tmux");
@@ -65,8 +67,11 @@ async function createWindow(pi: ExtensionAPI, opts: CreateWindowOptions): Promis
 		);
 	}
 
-	const lockResult = await createLock(getTmuxLockName(name));
-	const lockName = lockResult?.name ?? null;
+	let lockName: string | null = null;
+	if (!skipTmuxLock) {
+		const lockResult = await createLock(getTmuxLockName(name));
+		lockName = lockResult?.name ?? null;
+	}
 
 	// Wrap command to release the lock when it finishes (regardless of exit code)
 	const lockCleanup = lockName ? `; rm -f '/tmp/pi-locks/${lockName}'` : "";
@@ -423,8 +428,8 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Spawn a pi coding agent in a new tmux window. Creates the window, launches pi in the given folder, " +
 			"waits for startup (until >10 lines of output appear or 5 seconds pass), and returns the captured output. " +
-			"The window name is used as the lock name for semaphore coordination. " +
-			"After startup, use tmux-send to send tasks and semaphore_wait to wait for completion.",
+			"The spawned pi agent creates its own semaphore lock using the window name (e.g., name='worker' → lock 'worker'). " +
+			"After startup, use tmux-send to send tasks and semaphore_wait with the window name to wait for the agent to finish.",
 		parameters: tmuxCodingAgentParams,
 
 		async execute(_toolCallId, params, signal, onUpdate) {
@@ -432,7 +437,7 @@ export default function (pi: ExtensionAPI) {
 			const piCommand = piArgs ? `pi ${piArgs}` : "pi";
 
 			try {
-				const { lockName } = await createWindow(pi, { name, command: piCommand, cwd: folder, signal });
+				const { lockName } = await createWindow(pi, { name, command: piCommand, cwd: folder, signal, skipTmuxLock: true });
 
 				onUpdate?.({
 					content: [{ type: "text", text: `Window '${name}' created. Waiting for pi to start...` }],
@@ -482,15 +487,15 @@ export default function (pi: ExtensionAPI) {
 					output += ` (${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)})]`;
 				}
 
-				const lockInfo = lockName ? ` Lock '${lockName}' created.` : "";
+				const agentLockName = sanitizeName(name);
 				return {
 					content: [
 						{
 							type: "text",
-							text: `Pi agent '${name}' started in ${folder}.${lockInfo}\n\nStartup output:\n${output || "(empty)"}\n\nUse tmux-send to send tasks, semaphore_wait to wait for completion.`,
+							text: `Pi agent '${name}' started in ${folder}.\n\nStartup output:\n${output || "(empty)"}\n\nUse tmux-send to send tasks, semaphore_wait('${agentLockName}') to wait for completion.`,
 						},
 					],
-					details: { name, folder, piCommand, lock: lockName, created: Date.now() },
+					details: { name, folder, piCommand, agentLock: agentLockName, created: Date.now() },
 				};
 			} catch (error) {
 				return tmuxErrorResult(error);
