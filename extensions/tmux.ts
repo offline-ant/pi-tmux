@@ -9,6 +9,7 @@
  *   tmux-capture - Capture output from a tmux window
  *   tmux-send  - Send keys/text to a tmux window
  *   tmux-kill  - Kill a tmux window
+ *   tmux-coding-agent - Spawn a pi coding agent in a tmux window and wait for startup
  *
  * Usage:
  *   pi -e ~/.pi/agent/extensions/tmux.ts
@@ -21,9 +22,14 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { truncateTail, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize } from "@mariozechner/pi-coding-agent";
 import { Type, type Static } from "@sinclair/typebox";
+import { createLock, releaseLock, sanitizeName } from "pi-semaphore/extensions/semaphore-locks.js";
 
-// Track active windows
-const activeWindows = new Map<string, { created: number }>();
+// Track active windows and their locks
+const activeWindows = new Map<string, { created: number; lockName: string | null }>();
+
+function getTmuxLockName(windowName: string): string {
+	return `tmux:${sanitizeName(windowName)}`;
+}
 
 function isTmuxAvailable(): boolean {
 	return !!process.env.TMUX;
@@ -60,6 +66,14 @@ const tmuxKillParams = Type.Object({
 	name: Type.String({ description: "Name of the tmux window to kill" }),
 });
 export type TmuxKillInput = Static<typeof tmuxKillParams>;
+
+// tmux-coding-agent parameters
+const tmuxCodingAgentParams = Type.Object({
+	name: Type.String({ description: "Name for the tmux window and lock (e.g., 'worker', 'reviewer')" }),
+	folder: Type.String({ description: "Working directory for the pi instance (e.g., '../hppr')" }),
+	piArgs: Type.Optional(Type.String({ description: "Additional pi CLI arguments (e.g., '--model claude-opus-4-6')" })),
+});
+export type TmuxCodingAgentInput = Static<typeof tmuxCodingAgentParams>;
 
 export default function (pi: ExtensionAPI) {
 	// Check tmux availability on session start
@@ -103,15 +117,27 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			try {
+				// Create semaphore lock for this tmux window (with automatic deduplication)
+				const baseLockName = getTmuxLockName(name);
+				const lockResult = await createLock(baseLockName);
+				const actualLockName = lockResult?.name ?? null;
+
+				// Build command with PI_LOCK_NAME env var so spawned pi instances use window name as lock
+				const wrappedCommand = `PI_LOCK_NAME=${sanitizeName(name)} ${command || "bash"}`;
+
 				// Create new window with the given name
 				// Use remain-on-exit so window stays open after command completes
 				const result = await pi.exec(
 					"tmux",
-					["new-window", "-n", name, "-d", "-P", "-F", "#{window_id}", command],
+					["new-window", "-n", name, "-d", "-P", "-F", "#{window_id}", wrappedCommand],
 					{ signal },
 				);
 
 				if (result.code !== 0) {
+					// Clean up lock if window creation failed
+					if (actualLockName) {
+						await releaseLock(actualLockName);
+					}
 					return {
 						content: [{ type: "text", text: `Error creating tmux window: ${result.stderr || result.stdout}` }],
 						details: { error: "create_failed", stderr: result.stderr, stdout: result.stdout },
@@ -123,16 +149,17 @@ export default function (pi: ExtensionAPI) {
 				const windowId = result.stdout.trim();
 				await pi.exec("tmux", ["set-option", "-t", windowId, "remain-on-exit", "on"], { signal });
 
-				activeWindows.set(name, { created: Date.now() });
+				activeWindows.set(name, { created: Date.now(), lockName: actualLockName });
 
+				const lockInfo = actualLockName ? ` Lock '${actualLockName}' created.` : "";
 				return {
 					content: [
 						{
 							type: "text",
-							text: `Created tmux window '${name}' and started command: ${command}\n\nUse tmux-capture to see output, tmux-send to interact, or tmux-kill to close.`,
+							text: `Created tmux window '${name}' running: ${command || "bash"}${lockInfo}\n\nUse tmux-capture to see output, tmux-send to interact, or tmux-kill to close.`,
 						},
 					],
-					details: { name, command, created: Date.now() },
+					details: { name, command: command || "bash", created: Date.now(), lock: actualLockName },
 				};
 			} catch (error) {
 				return {
@@ -211,7 +238,7 @@ export default function (pi: ExtensionAPI) {
 
 				// Update tracking
 				if (!activeWindows.has(name)) {
-					activeWindows.set(name, { created: Date.now() });
+					activeWindows.set(name, { created: Date.now(), lockName: null });
 				}
 
 				return {
@@ -320,6 +347,11 @@ export default function (pi: ExtensionAPI) {
 				const windowNames = checkResult.stdout.split("\n").filter(Boolean);
 
 				if (!windowNames.includes(name)) {
+					// Release lock if we were tracking this window
+					const windowInfo = activeWindows.get(name);
+					if (windowInfo?.lockName) {
+						await releaseLock(windowInfo.lockName);
+					}
 					activeWindows.delete(name);
 					return {
 						content: [{ type: "text", text: `Window '${name}' not found (may have already exited).` }],
@@ -329,6 +361,14 @@ export default function (pi: ExtensionAPI) {
 
 				const result = await pi.exec("tmux", ["kill-window", "-t", name], { signal });
 
+				// Release lock for this window
+				const windowInfo = activeWindows.get(name);
+				let lockReleased = false;
+				let releasedLockName: string | null = null;
+				if (windowInfo?.lockName) {
+					lockReleased = await releaseLock(windowInfo.lockName);
+					releasedLockName = windowInfo.lockName;
+				}
 				activeWindows.delete(name);
 
 				if (result.code !== 0) {
@@ -339,9 +379,147 @@ export default function (pi: ExtensionAPI) {
 					};
 				}
 
+				const lockInfo = lockReleased && releasedLockName ? ` Lock '${releasedLockName}' released.` : "";
 				return {
-					content: [{ type: "text", text: `Killed tmux window '${name}'.` }],
-					details: { name, killed: true },
+					content: [{ type: "text", text: `Killed tmux window '${name}'.${lockInfo}` }],
+					details: { name, killed: true, lockReleased, lockName: releasedLockName },
+				};
+			} catch (error) {
+				return {
+					content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+					details: { error: "exception" },
+					isError: true,
+				};
+			}
+		},
+	});
+
+	// tmux-coding-agent: Spawn a pi instance in a tmux window, wait for startup, return initial output
+	pi.registerTool({
+		name: "tmux-coding-agent",
+		label: "Tmux Coding Agent",
+		description:
+			"Spawn a pi coding agent in a new tmux window. Creates the window, launches pi in the given folder, " +
+			"waits for startup (until >10 lines of output appear or 5 seconds pass), and returns the captured output. " +
+			"The window name is used as the lock name for semaphore coordination. " +
+			"After startup, use tmux-send to send tasks and semaphore_wait to wait for completion.",
+		parameters: tmuxCodingAgentParams,
+
+		async execute(_toolCallId, params, signal, onUpdate, _ctx) {
+			if (!isTmuxAvailable()) {
+				return {
+					content: [{ type: "text", text: "Error: Not running inside a tmux session. TMUX env variable not set." }],
+					details: { error: "no_tmux" },
+					isError: true,
+				};
+			}
+
+			const { name, folder, piArgs } = params;
+
+			// Check if window already exists
+			if (windowExists(name)) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Error: Window '${name}' already exists. Use tmux-kill to close it first, or pick a different name.`,
+						},
+					],
+					details: { error: "window_exists", name },
+					isError: true,
+				};
+			}
+
+			try {
+				// Create semaphore lock for this tmux window
+				const baseLockName = getTmuxLockName(name);
+				const lockResult = await createLock(baseLockName);
+				const actualLockName = lockResult?.name ?? null;
+
+				// Build the pi command
+				const piCommand = piArgs ? `pi ${piArgs}` : "pi";
+				const wrappedCommand = `PI_LOCK_NAME=${sanitizeName(name)} bash -c 'cd ${folder} && ${piCommand}'`;
+
+				// Create new window
+				const result = await pi.exec(
+					"tmux",
+					["new-window", "-n", name, "-d", "-P", "-F", "#{window_id}", wrappedCommand],
+					{ signal },
+				);
+
+				if (result.code !== 0) {
+					if (actualLockName) {
+						await releaseLock(actualLockName);
+					}
+					return {
+						content: [{ type: "text", text: `Error creating tmux window: ${result.stderr || result.stdout}` }],
+						details: { error: "create_failed", stderr: result.stderr, stdout: result.stdout },
+						isError: true,
+					};
+				}
+
+				const windowId = result.stdout.trim();
+				await pi.exec("tmux", ["set-option", "-t", windowId, "remain-on-exit", "on"], { signal });
+
+				activeWindows.set(name, { created: Date.now(), lockName: actualLockName });
+
+				onUpdate?.({
+					content: [{ type: "text", text: `Window '${name}' created. Waiting for pi to start...` }],
+					details: { waiting: true, name },
+				});
+
+				// Wait for startup: >10 non-empty lines or 5 seconds, whichever comes first
+				const startTime = Date.now();
+				const maxWait = 5000;
+				const pollMs = 300;
+				let capturedOutput = "";
+
+				while (Date.now() - startTime < maxWait) {
+					if (signal?.aborted) break;
+
+					const cap = await pi.exec("tmux", ["capture-pane", "-t", name, "-p", "-S", "-500"], { signal });
+					if (cap.code === 0) {
+						const trimmed = cap.stdout.replace(/\n+$/, "");
+						const lineCount = trimmed.split("\n").filter((l) => l.trim().length > 0).length;
+						if (lineCount > 10) {
+							capturedOutput = trimmed;
+							break;
+						}
+						capturedOutput = trimmed;
+					}
+
+					await new Promise((resolve) => setTimeout(resolve, pollMs));
+				}
+
+				// One final capture if we timed out
+				if (!capturedOutput || capturedOutput.split("\n").filter((l) => l.trim().length > 0).length <= 10) {
+					const cap = await pi.exec("tmux", ["capture-pane", "-t", name, "-p", "-S", "-500"], { signal });
+					if (cap.code === 0) {
+						capturedOutput = cap.stdout.replace(/\n+$/, "");
+					}
+				}
+
+				// Apply truncation
+				const truncation = truncateTail(capturedOutput, {
+					maxLines: DEFAULT_MAX_LINES,
+					maxBytes: DEFAULT_MAX_BYTES,
+				});
+
+				let output = truncation.content;
+				if (truncation.truncated) {
+					output += `\n\n[Output truncated: showing last ${truncation.outputLines} of ${truncation.totalLines} lines`;
+					output += ` (${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)})]`;
+				}
+
+				const lockInfo = actualLockName ? ` Lock '${actualLockName}' created.` : "";
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Pi agent '${name}' started in ${folder}.${lockInfo}\n\nStartup output:\n${output || "(empty)"}\n\nUse tmux-send to send tasks, semaphore_wait to wait for completion.`,
+						},
+					],
+					details: { name, folder, piCommand, lock: actualLockName, created: Date.now() },
 				};
 			} catch (error) {
 				return {

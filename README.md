@@ -6,6 +6,7 @@ Tmux tools for [pi](https://github.com/badlogic/pi-mono) - run long-running comm
 
 - Must be running inside a tmux session (`TMUX` env var set)
 - tmux must be installed
+- [pi-semaphore](https://github.com/offline-ant/pi-semaphore) (installed as dependency)
 
 ## Installation
 
@@ -23,10 +24,23 @@ pi -e git:github.com/offline-ant/pi-tmux
 
 | Tool | Description |
 |------|-------------|
-| `tmux-bash` | Create a new tmux window and execute a command |
+| `tmux-bash` | Create a new tmux window and execute a command (defaults to `bash`) |
 | `tmux-capture` | Capture output from a tmux window pane |
 | `tmux-send` | Send text or keys to a tmux window |
 | `tmux-kill` | Kill a tmux window and its running process |
+| `tmux-coding-agent` | Spawn a pi coding agent in a tmux window, wait for startup, return initial output |
+
+## Semaphore Integration
+
+When `tmux-bash` creates a window:
+
+1. **Sets `PI_LOCK_NAME`** - The window name is passed to spawned processes via the `PI_LOCK_NAME` environment variable. If you spawn a pi instance in the window, it will use the window name as its lock name instead of the directory basename.
+
+2. **Creates a `tmux:<name>` lock** - A semaphore lock is created for the tmux window itself. This lock is released when `tmux-kill` is called. If a lock with the same name already exists, a suffix is appended (`tmux:worker-2`, etc.).
+
+This means you can:
+- `semaphore_wait worker` - Wait for a pi instance running in window "worker"
+- `semaphore_wait tmux:worker` - Wait for the tmux window "worker" to be killed
 
 ## Example
 
@@ -36,6 +50,25 @@ The LLM can use these tools to manage long-running processes:
 2. Check output: `tmux-capture` with name "dev"
 3. Stop the server: `tmux-send` with name "dev" and text "C-c" (Ctrl+C)
 4. Clean up: `tmux-kill` with name "dev"
+
+To spawn a pi coding agent (single tool call):
+
+1. Spawn agent: `tmux-coding-agent` with name "worker", folder "../hppr"
+2. Wait for startup output (automatic - waits for >10 lines or 5 seconds)
+3. Send task: `tmux-send` with name "worker" and text "implement feature X"
+4. Wait for completion: `semaphore_wait worker`
+5. Check output: `tmux-capture` with name "worker"
+
+With a specific model:
+
+1. Spawn: `tmux-coding-agent` with name "worker", folder "../hppr", piArgs "--model claude-opus-4-6"
+
+The manual approach (equivalent, more control):
+
+1. Create window: `tmux-bash` with name "worker" (no command defaults to bash)
+2. Start pi: `tmux-send` with name "worker" and text "pi"
+3. Wait for idle: `semaphore_wait worker`
+4. Send instruction: `tmux-send` with name "worker" and text "do something"
 
 ## Commands
 
