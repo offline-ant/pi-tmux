@@ -158,7 +158,8 @@ export type TmuxKillInput = Static<typeof tmuxKillParams>;
 const tmuxCodingAgentParams = Type.Object({
 	name: Type.String({ description: "Name for the tmux window and lock (e.g., 'worker', 'reviewer')" }),
 	folder: Type.String({ description: "Working directory for the pi instance (e.g., '../hppr')" }),
-	piArgs: Type.Optional(Type.String({ description: "Additional pi CLI arguments (e.g., '--model claude-opus-4-6')" })),
+	model: Type.Optional(Type.String({ description: "Model to use (e.g., 'claude-opus-4-6', 'gpt-4o'). Passed as --model to pi." })),
+	piArgs: Type.Optional(Type.String({ description: "Additional pi CLI arguments (e.g., '--thinking high')" })),
 });
 export type TmuxCodingAgentInput = Static<typeof tmuxCodingAgentParams>;
 
@@ -433,8 +434,11 @@ export default function (pi: ExtensionAPI) {
 		parameters: tmuxCodingAgentParams,
 
 		async execute(_toolCallId, params, signal, onUpdate) {
-			const { name, folder, piArgs } = params;
-			const piCommand = piArgs ? `pi ${piArgs}` : "pi";
+			const { name, folder, model, piArgs } = params;
+			const piParts = ["pi"];
+			if (model) piParts.push("--model", model);
+			if (piArgs) piParts.push(piArgs);
+			const piCommand = piParts.join(" ");
 
 			try {
 				const { lockName } = await createWindow(pi, { name, command: piCommand, cwd: folder, signal, skipTmuxLock: true });

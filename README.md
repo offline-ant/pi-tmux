@@ -66,7 +66,7 @@ To spawn a pi coding agent (single tool call):
 
 With a specific model:
 
-1. Spawn: `tmux-coding-agent` with name "worker", folder "../hppr", piArgs "--model claude-opus-4-6"
+1. Spawn: `tmux-coding-agent` with name "worker", folder "../hppr", model "claude-opus-4-6"
 
 The manual approach (equivalent, more control):
 
