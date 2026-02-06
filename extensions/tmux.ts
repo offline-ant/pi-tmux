@@ -76,9 +76,6 @@ const tmuxCodingAgentParams = Type.Object({
 export type TmuxCodingAgentInput = Static<typeof tmuxCodingAgentParams>;
 
 export default function (pi: ExtensionAPI) {
-	// Force tmux to use bash for new windows, regardless of the user's default shell
-	process.env.SHELL = "/bin/bash";
-
 	// Check tmux availability on session start
 	pi.on("session_start", async (_event, ctx) => {
 		if (!isTmuxAvailable()) {
@@ -125,16 +122,17 @@ export default function (pi: ExtensionAPI) {
 				const lockResult = await createLock(baseLockName);
 				const actualLockName = lockResult?.name ?? null;
 
-				// Set PI_LOCK_NAME so spawned pi instances use window name as lock
-				const wrappedCommand = command
-					? `PI_LOCK_NAME=${sanitizeName(name)} ${command}`
-					: `PI_LOCK_NAME=${sanitizeName(name)} bash`;
+				// Build the bash script with PI_LOCK_NAME set
+				const bashScript = command
+					? `export PI_LOCK_NAME=${sanitizeName(name)}; ${command}`
+					: `export PI_LOCK_NAME=${sanitizeName(name)}; exec bash`;
 
 				// Create new window with the given name
-				// Use remain-on-exit so window stays open after command completes
+				// Pass "-- bash -c ..." as separate args so tmux invokes bash directly,
+				// bypassing the user's default shell (e.g. fish)
 				const result = await pi.exec(
 					"tmux",
-					["new-window", "-n", name, "-d", "-P", "-F", "#{window_id}", wrappedCommand],
+					["new-window", "-n", name, "-d", "-P", "-F", "#{window_id}", "--", "bash", "-c", bashScript],
 					{ signal },
 				);
 
@@ -443,12 +441,12 @@ export default function (pi: ExtensionAPI) {
 
 				// Build the pi command
 				const piCommand = piArgs ? `pi ${piArgs}` : "pi";
-				const wrappedCommand = `PI_LOCK_NAME=${sanitizeName(name)} bash -c 'cd ${folder} && ${piCommand}'`;
+				const bashScript = `export PI_LOCK_NAME=${sanitizeName(name)}; cd ${folder} && ${piCommand}`;
 
-				// Create new window
+				// Create new window — pass "-- bash -c ..." as separate args to bypass default shell
 				const result = await pi.exec(
 					"tmux",
-					["new-window", "-n", name, "-d", "-P", "-F", "#{window_id}", wrappedCommand],
+					["new-window", "-n", name, "-d", "-P", "-F", "#{window_id}", "--", "bash", "-c", bashScript],
 					{ signal },
 				);
 
