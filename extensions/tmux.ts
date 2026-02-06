@@ -68,6 +68,10 @@ async function createWindow(pi: ExtensionAPI, opts: CreateWindowOptions): Promis
 	const lockResult = await createLock(getTmuxLockName(name));
 	const lockName = lockResult?.name ?? null;
 
+	// Wrap command to release the lock when it finishes (regardless of exit code)
+	const lockCleanup = lockName ? `; rm -f '/tmp/pi-locks/${lockName}'` : "";
+	const wrappedCommand = `${command}${lockCleanup}`;
+
 	const args = [
 		"new-window", "-n", name, "-d", "-P", "-F", "#{window_id}",
 		"-e", `PI_LOCK_NAME=${sanitizeName(name)}`,
@@ -75,7 +79,7 @@ async function createWindow(pi: ExtensionAPI, opts: CreateWindowOptions): Promis
 	if (cwd) {
 		args.push("-c", cwd);
 	}
-	args.push("--", "bash", "-c", command);
+	args.push("--", "bash", "-c", wrappedCommand);
 
 	const result = await pi.exec("tmux", args, { signal });
 
@@ -95,8 +99,10 @@ async function createWindow(pi: ExtensionAPI, opts: CreateWindowOptions): Promis
 }
 
 class TmuxError extends Error {
-	constructor(message: string, public code: string) {
+	code: string;
+	constructor(message: string, code: string) {
 		super(message);
+		this.code = code;
 	}
 }
 
