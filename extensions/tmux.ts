@@ -430,7 +430,8 @@ export default function (pi: ExtensionAPI) {
 			"Spawn a pi coding agent in a new tmux window. Creates the window, launches pi in the given folder, " +
 			"waits for startup (until >10 lines of output appear or 5 seconds pass), and returns the captured output. " +
 			"The spawned pi agent creates its own semaphore lock using the window name (e.g., name='worker' → lock 'worker'). " +
-			"After startup, use tmux-send to send tasks and semaphore_wait with the window name to wait for the agent to finish.",
+			"After startup, use tmux-send to send tasks and semaphore_wait with the window name to wait for the agent to finish. " +
+			"Note: semaphore_wait blocks all progress until the lock is released — finish any independent work before calling it.",
 		parameters: tmuxCodingAgentParams,
 
 		async execute(_toolCallId, params, signal, onUpdate) {
