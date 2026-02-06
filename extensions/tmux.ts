@@ -122,17 +122,15 @@ export default function (pi: ExtensionAPI) {
 				const lockResult = await createLock(baseLockName);
 				const actualLockName = lockResult?.name ?? null;
 
-				// Build the bash script with PI_LOCK_NAME set
-				const bashScript = command
-					? `export PI_LOCK_NAME=${sanitizeName(name)}; ${command}`
-					: `export PI_LOCK_NAME=${sanitizeName(name)}; exec bash`;
-
 				// Create new window with the given name
-				// Pass "-- bash -c ..." as separate args so tmux invokes bash directly,
-				// bypassing the user's default shell (e.g. fish)
+				// Use -e for env and -- bash -c to bypass the default shell (e.g. fish)
 				const result = await pi.exec(
 					"tmux",
-					["new-window", "-n", name, "-d", "-P", "-F", "#{window_id}", "--", "bash", "-c", bashScript],
+					[
+						"new-window", "-n", name, "-d", "-P", "-F", "#{window_id}",
+						"-e", `PI_LOCK_NAME=${sanitizeName(name)}`,
+						"--", "bash", "-c", command || "exec bash",
+					],
 					{ signal },
 				);
 
@@ -441,12 +439,16 @@ export default function (pi: ExtensionAPI) {
 
 				// Build the pi command
 				const piCommand = piArgs ? `pi ${piArgs}` : "pi";
-				const bashScript = `export PI_LOCK_NAME=${sanitizeName(name)}; cd ${folder} && ${piCommand}`;
 
-				// Create new window — pass "-- bash -c ..." as separate args to bypass default shell
+				// Create new window — use -e for env, -c for directory, -- bash to bypass default shell
 				const result = await pi.exec(
 					"tmux",
-					["new-window", "-n", name, "-d", "-P", "-F", "#{window_id}", "--", "bash", "-c", bashScript],
+					[
+						"new-window", "-n", name, "-d", "-P", "-F", "#{window_id}",
+						"-e", `PI_LOCK_NAME=${sanitizeName(name)}`,
+						"-c", folder,
+						"--", "bash", "-c", piCommand,
+					],
 					{ signal },
 				);
 
