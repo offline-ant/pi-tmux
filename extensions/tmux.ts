@@ -76,6 +76,9 @@ const tmuxCodingAgentParams = Type.Object({
 export type TmuxCodingAgentInput = Static<typeof tmuxCodingAgentParams>;
 
 export default function (pi: ExtensionAPI) {
+	// Force tmux to use bash for new windows, regardless of the user's default shell
+	process.env.SHELL = "/bin/bash";
+
 	// Check tmux availability on session start
 	pi.on("session_start", async (_event, ctx) => {
 		if (!isTmuxAvailable()) {
@@ -122,9 +125,9 @@ export default function (pi: ExtensionAPI) {
 				const lockResult = await createLock(baseLockName);
 				const actualLockName = lockResult?.name ?? null;
 
-				// Always run bash explicitly (never the user's default shell) with PI_LOCK_NAME set
+				// Set PI_LOCK_NAME so spawned pi instances use window name as lock
 				const wrappedCommand = command
-					? `PI_LOCK_NAME=${sanitizeName(name)} bash -c ${JSON.stringify(command)}`
+					? `PI_LOCK_NAME=${sanitizeName(name)} ${command}`
 					: `PI_LOCK_NAME=${sanitizeName(name)} bash`;
 
 				// Create new window with the given name
