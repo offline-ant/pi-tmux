@@ -103,6 +103,33 @@ async function createWindow(pi: ExtensionAPI, opts: CreateWindowOptions): Promis
 	return { lockName };
 }
 
+/**
+ * Strip the pi startup help block from captured output.
+ * Removes everything from the "pi v<version>" line through the next empty line.
+ * Keeps the version line itself (just the first line), drops the keybinding hints.
+ */
+function stripStartupHelp(output: string): string {
+	const lines = output.split("\n");
+	let startIdx = -1;
+	for (let i = 0; i < lines.length; i++) {
+		if (/^\s*pi v\d+\.\d+\.\d+/.test(lines[i])) {
+			startIdx = i;
+			break;
+		}
+	}
+	if (startIdx === -1) return output;
+
+	// Find the next empty line after the version line
+	let endIdx = startIdx + 1;
+	while (endIdx < lines.length && lines[endIdx].trim() !== "") {
+		endIdx++;
+	}
+	// endIdx now points at the empty line (or end of array)
+	// Remove from startIdx+1 (keep the version line) through endIdx (inclusive, the blank line)
+	lines.splice(startIdx + 1, endIdx - startIdx);
+	return lines.join("\n");
+}
+
 class TmuxError extends Error {
 	code: string;
 	constructor(message: string, code: string) {
@@ -158,8 +185,7 @@ export type TmuxKillInput = Static<typeof tmuxKillParams>;
 const tmuxCodingAgentParams = Type.Object({
 	name: Type.String({ description: "Name for the tmux window and lock (e.g., 'worker', 'reviewer')" }),
 	folder: Type.String({ description: "Working directory for the pi instance (e.g., '../hppr')" }),
-	model: Type.Optional(Type.String({ description: "Model to use (e.g., 'claude-opus-4-6', 'gpt-4o'). Passed as --model to pi." })),
-	piArgs: Type.Optional(Type.String({ description: "Additional pi CLI arguments (e.g., '--thinking high')" })),
+	piArgs: Type.Optional(Type.String({ description: "Additional pi CLI arguments. To launch a codex agent, use '--provider openai-codex --model gpt-5.2-codex'. For thinking mode, use '--thinking high'." })),
 });
 export type TmuxCodingAgentInput = Static<typeof tmuxCodingAgentParams>;
 
@@ -435,9 +461,8 @@ export default function (pi: ExtensionAPI) {
 		parameters: tmuxCodingAgentParams,
 
 		async execute(_toolCallId, params, signal, onUpdate) {
-			const { name, folder, model, piArgs } = params;
+			const { name, folder, piArgs } = params;
 			const piParts = ["pi"];
-			if (model) piParts.push("--model", model);
 			if (piArgs) piParts.push(piArgs);
 			const piCommand = piParts.join(" ");
 
@@ -479,6 +504,9 @@ export default function (pi: ExtensionAPI) {
 						capturedOutput = cap.stdout.replace(/\n+$/, "");
 					}
 				}
+
+				// Strip the keybinding help block from startup output
+				capturedOutput = stripStartupHelp(capturedOutput);
 
 				// Apply truncation
 				const truncation = truncateTail(capturedOutput, {
