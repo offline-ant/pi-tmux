@@ -172,12 +172,15 @@ async function createWindow(
 }
 
 /**
- * Strip the pi startup help block from captured output.
- * Removes everything from the "pi v<version>" line through the next empty line.
- * Keeps the version line itself (just the first line), drops the keybinding hints.
+ * Strip the pi startup help block and [Extensions] block from captured output.
+ * Removes everything from the "pi v<version>" line through the next empty line
+ * (keeps the version line itself, drops the keybinding hints).
+ * Also removes the [Extensions] block entirely.
  */
 function stripStartupHelp(output: string): string {
   const lines = output.split("\n");
+
+  // Strip controls block after "pi v<version>"
   let startIdx = -1;
   for (let i = 0; i < lines.length; i++) {
     if (/^\s*pi v\d+\.\d+\.\d+/.test(lines[i])) {
@@ -185,16 +188,33 @@ function stripStartupHelp(output: string): string {
       break;
     }
   }
-  if (startIdx === -1) return output;
-
-  // Find the next empty line after the version line
-  let endIdx = startIdx + 1;
-  while (endIdx < lines.length && lines[endIdx].trim() !== "") {
-    endIdx++;
+  if (startIdx !== -1) {
+    // Find the next empty line after the version line
+    let endIdx = startIdx + 1;
+    while (endIdx < lines.length && lines[endIdx].trim() !== "") {
+      endIdx++;
+    }
+    // Remove from startIdx+1 (keep the version line) through endIdx (inclusive, the blank line)
+    lines.splice(startIdx + 1, endIdx - startIdx);
   }
-  // endIdx now points at the empty line (or end of array)
-  // Remove from startIdx+1 (keep the version line) through endIdx (inclusive, the blank line)
-  lines.splice(startIdx + 1, endIdx - startIdx);
+
+  // Strip [Extensions] block: from the [Extensions] line through the next empty line
+  let extIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\s*\[Extensions\]/.test(lines[i])) {
+      extIdx = i;
+      break;
+    }
+  }
+  if (extIdx !== -1) {
+    let endIdx = extIdx + 1;
+    while (endIdx < lines.length && lines[endIdx].trim() !== "") {
+      endIdx++;
+    }
+    // Remove from extIdx through endIdx (inclusive, the trailing blank line)
+    lines.splice(extIdx, endIdx - extIdx + 1);
+  }
+
   return lines.join("\n");
 }
 
@@ -385,7 +405,7 @@ export default function (pi: ExtensionAPI) {
         // Capture pane output
         const result = await pi.exec(
           "tmux",
-          ["capture-pane", "-t", name, "-p", "-S", `-${lines}`],
+          ["capture-pane", "-t", `${name}.0`, "-p", "-S", `-${lines}`],
           { signal },
         );
 
@@ -675,7 +695,7 @@ export default function (pi: ExtensionAPI) {
 
           const cap = await pi.exec(
             "tmux",
-            ["capture-pane", "-t", actualName, "-p", "-S", "-500"],
+            ["capture-pane", "-t", `${actualName}.0`, "-p", "-S", "-500"],
             { signal },
           );
           if (cap.code === 0) {
@@ -701,7 +721,7 @@ export default function (pi: ExtensionAPI) {
         ) {
           const cap = await pi.exec(
             "tmux",
-            ["capture-pane", "-t", actualName, "-p", "-S", "-500"],
+            ["capture-pane", "-t", `${actualName}.0`, "-p", "-S", "-500"],
             { signal },
           );
           if (cap.code === 0) {
