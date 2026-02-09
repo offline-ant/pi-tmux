@@ -36,8 +36,15 @@ import {
 // Track active windows and their locks
 const activeWindows = new Map<
   string,
-  { created: number; lockName: string | null }
+  { created: number; lockName: string | null; isCodingAgent: boolean }
 >();
+
+// Track the last input text we warned about per window.
+// If tmux-send detects text in a coding agent's input box, it stores the text here
+// and returns a warning. On the next send attempt, if the text is unchanged, the
+// warning is cleared and the send proceeds (the human stopped typing). If the text
+// changed, the warning fires again with the new text.
+const lastWarnedInput = new Map<string, string>();
 
 function getTmuxLockName(windowName: string): string {
   return `tmux:${sanitizeName(windowName)}`;
@@ -166,7 +173,7 @@ async function createWindow(
     ["set-option", "-t", windowId, "remain-on-exit", "on"],
     { signal },
   );
-  activeWindows.set(name, { created: Date.now(), lockName });
+  activeWindows.set(name, { created: Date.now(), lockName, isCodingAgent: false });
 
   return { name, lockName };
 }
@@ -216,6 +223,53 @@ function stripStartupHelp(output: string): string {
   }
 
   return lines.join("\n");
+}
+
+/**
+ * Detect text in a pi coding agent's input box from captured tmux output.
+ *
+ * The pi TUI renders the input area between two horizontal separator lines
+ * (made of ─ characters), followed by the footer (pwd, stats, model info).
+ * When the input is empty, there's nothing (or just whitespace) between
+ * the two separators. When a human is typing, their text appears there.
+ *
+ * Returns the detected input text, or null if the input box is empty or
+ * the pi input layout wasn't found.
+ */
+function detectPiInputText(capturedOutput: string): string | null {
+  const lines = capturedOutput.split("\n");
+
+  // Find separator lines (lines consisting entirely of ─ characters, at least 10 wide).
+  // We want the LAST pair of consecutive separators (the input box is at the bottom,
+  // right above the footer).
+  const separatorIndices: number[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (trimmed.length >= 10 && /^[─]+$/.test(trimmed)) {
+      separatorIndices.push(i);
+    }
+  }
+
+  // Need at least two separators to form an input box
+  if (separatorIndices.length < 2) {
+    return null;
+  }
+
+  // Take the last two separators
+  const topSep = separatorIndices[separatorIndices.length - 2];
+  const bottomSep = separatorIndices[separatorIndices.length - 1];
+
+  // Extract lines between the two separators
+  const betweenLines = lines.slice(topSep + 1, bottomSep);
+  const inputText = betweenLines
+    .map((l) => l.replace(/\x1b\[[0-9;]*m/g, "").trim()) // strip ANSI codes
+    .filter((l) => l.length > 0 && l !== ">") // ignore empty lines and bare prompt
+    .join("\n");
+
+  // The pi input prompt is "> " - strip it if present
+  const cleaned = inputText.replace(/^>\s?/, "").trim();
+
+  return cleaned.length > 0 ? cleaned : null;
 }
 
 class TmuxError extends Error {
@@ -437,7 +491,7 @@ export default function (pi: ExtensionAPI) {
 
         // Update tracking
         if (!activeWindows.has(name)) {
-          activeWindows.set(name, { created: Date.now(), lockName: null });
+          activeWindows.set(name, { created: Date.now(), lockName: null, isCodingAgent: false });
         }
 
         return {
@@ -502,6 +556,53 @@ export default function (pi: ExtensionAPI) {
             details: { error: "window_not_found" },
             isError: true,
           };
+        }
+
+        // If this is a coding agent window, check for human input before sending.
+        // Only check when we're about to submit (enter=true) — if we're just
+        // sending text without Enter, there's no risk of clobbering.
+        const windowInfo = activeWindows.get(name);
+        if (windowInfo?.isCodingAgent && enter) {
+          const capResult = await pi.exec(
+            "tmux",
+            ["capture-pane", "-t", `${name}.0`, "-p", "-S", "-50"],
+            { signal },
+          );
+          if (capResult.code === 0) {
+            const existingInput = detectPiInputText(capResult.stdout);
+            if (existingInput !== null) {
+              const previouslyWarned = lastWarnedInput.get(name);
+              if (previouslyWarned === existingInput) {
+                // Same text as last warning — human stopped typing, allow the send.
+                lastWarnedInput.delete(name);
+              } else {
+                // New or changed text — warn and record it.
+                lastWarnedInput.set(name, existingInput);
+                return {
+                  content: [
+                    {
+                      type: "text",
+                      text:
+                        `Warning: The pi input box in window '${name}' already contains text:\n\n` +
+                        `  "${existingInput}"\n\n` +
+                        `A human may be typing. The send was NOT executed.\n` +
+                        `You may retry the tmux-send if this was text you placed.`,
+                    },
+                  ],
+                  details: {
+                    error: "human_typing_detected",
+                    name,
+                    existingInput,
+                    intendedText: text,
+                  },
+                  isError: true,
+                };
+              }
+            } else {
+              // Input is empty — clear any stale warning state.
+              lastWarnedInput.delete(name);
+            }
+          }
         }
 
         // Build tmux send-keys command
@@ -582,6 +683,7 @@ export default function (pi: ExtensionAPI) {
             await releaseLock(windowInfo.lockName);
           }
           activeWindows.delete(name);
+          lastWarnedInput.delete(name);
           return {
             content: [
               {
@@ -596,6 +698,9 @@ export default function (pi: ExtensionAPI) {
         const result = await pi.exec("tmux", ["kill-window", "-t", name], {
           signal,
         });
+
+        // Clean up warning state
+        lastWarnedInput.delete(name);
 
         // Release lock for this window
         const windowInfo = activeWindows.get(name);
@@ -673,6 +778,12 @@ export default function (pi: ExtensionAPI) {
           signal,
           skipTmuxLock: true,
         });
+
+        // Mark this window as a coding agent for human-typing detection
+        const windowInfo = activeWindows.get(actualName);
+        if (windowInfo) {
+          windowInfo.isCodingAgent = true;
+        }
 
         onUpdate?.({
           content: [
@@ -790,5 +901,6 @@ export default function (pi: ExtensionAPI) {
   // Clean up tracking on shutdown
   pi.on("session_shutdown", async () => {
     activeWindows.clear();
+    lastWarnedInput.clear();
   });
 }
