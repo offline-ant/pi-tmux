@@ -695,6 +695,50 @@ export default function (pi: ExtensionAPI) {
           };
         }
 
+        // If this is a coding agent window, check for human input before killing.
+        const windowInfo = activeWindows.get(name);
+        if (windowInfo?.isCodingAgent) {
+          const capResult = await pi.exec(
+            "tmux",
+            ["capture-pane", "-t", `${name}.0`, "-p", "-S", "-50"],
+            { signal },
+          );
+          if (capResult.code === 0) {
+            const existingInput = detectPiInputText(capResult.stdout);
+            if (existingInput !== null) {
+              const previouslyWarned = lastWarnedInput.get(name);
+              if (previouslyWarned === existingInput) {
+                // Same text as last warning — human stopped typing, allow the kill.
+                lastWarnedInput.delete(name);
+              } else {
+                // New or changed text — warn and record it.
+                lastWarnedInput.set(name, existingInput);
+                return {
+                  content: [
+                    {
+                      type: "text",
+                      text:
+                        `Warning: The pi input box in window '${name}' contains text:\n\n` +
+                        `  "${existingInput}"\n\n` +
+                        `A human may be typing. The kill was NOT executed.\n` +
+                        `Retry tmux-kill if you still want to close this window.`,
+                    },
+                  ],
+                  details: {
+                    error: "human_typing_detected",
+                    name,
+                    existingInput,
+                  },
+                  isError: true,
+                };
+              }
+            } else {
+              // Input is empty — clear any stale warning state.
+              lastWarnedInput.delete(name);
+            }
+          }
+        }
+
         const result = await pi.exec("tmux", ["kill-window", "-t", name], {
           signal,
         });
@@ -703,12 +747,12 @@ export default function (pi: ExtensionAPI) {
         lastWarnedInput.delete(name);
 
         // Release lock for this window
-        const windowInfo = activeWindows.get(name);
+        const trackedWindow = activeWindows.get(name);
         let lockReleased = false;
         let releasedLockName: string | null = null;
-        if (windowInfo?.lockName) {
-          lockReleased = await releaseLock(windowInfo.lockName);
-          releasedLockName = windowInfo.lockName;
+        if (trackedWindow?.lockName) {
+          lockReleased = await releaseLock(trackedWindow.lockName);
+          releasedLockName = trackedWindow.lockName;
         }
         activeWindows.delete(name);
 
