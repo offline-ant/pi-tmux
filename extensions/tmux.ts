@@ -21,17 +21,21 @@
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
+  isToolCallEventType,
   truncateTail,
   DEFAULT_MAX_BYTES,
   DEFAULT_MAX_LINES,
   formatSize,
 } from "@mariozechner/pi-coding-agent";
 import { Type, type Static } from "@sinclair/typebox";
-import {
-  createLock,
-  releaseLock,
-  sanitizeName,
-} from "pi-semaphore/extensions/semaphore-locks.js";
+// Resolve semaphore-locks from package (normal install) or same directory (standalone copy)
+let _semaphore: typeof import("pi-semaphore/extensions/semaphore-locks.js");
+try {
+  _semaphore = require("pi-semaphore/extensions/semaphore-locks.js");
+} catch {
+  _semaphore = require("./semaphore-locks.js");
+}
+const { createLock, releaseLock, sanitizeName } = _semaphore;
 
 // Track active windows and their locks
 const activeWindows = new Map<
@@ -138,7 +142,7 @@ async function createWindow(
   }
 
   // Wrap command to release the lock when it finishes (regardless of exit code)
-  const lockCleanup = lockName ? `; rm -f '/tmp/pi-locks/${lockName}'` : "";
+  const lockCleanup = lockName ? `; rm -f '/tmp/pi-semaphores/${lockName}'` : "";
   const wrappedCommand = `${command}${lockCleanup}`;
 
   const args = [
@@ -167,12 +171,6 @@ async function createWindow(
     );
   }
 
-  const windowId = result.stdout.trim();
-  await pi.exec(
-    "tmux",
-    ["set-option", "-t", windowId, "remain-on-exit", "on"],
-    { signal },
-  );
   activeWindows.set(name, { created: Date.now(), lockName, isCodingAgent: false });
 
   return { name, lockName };
@@ -362,13 +360,50 @@ const tmuxCodingAgentParams = Type.Object({
 export type TmuxCodingAgentInput = Static<typeof tmuxCodingAgentParams>;
 
 export default function (pi: ExtensionAPI) {
-  // Check tmux availability on session start
+  // Warn when bash commands use 'sleep' — suggest tmux-bash + semaphore_wait instead.
+  // Allows on retry if the same command is resent.
+  const warnedSleepCommands = new Set<string>();
+  pi.on("tool_call", async (event, _ctx) => {
+    if (isToolCallEventType("bash", event) && /sleep\s+\d/.test(event.input.command)) {
+      if (warnedSleepCommands.has(event.input.command)) {
+        warnedSleepCommands.delete(event.input.command);
+        return;
+      }
+      warnedSleepCommands.add(event.input.command);
+      return {
+        block: true,
+        reason: "REJECTED: 'sleep' detected. Use tmux-bash + semaphore_wait instead.",
+      };
+    }
+  });
+
+  // Warn when bash commands background a process with ' &' — suggest tmux-bash instead.
+  // Allows on retry if the same command is resent.
+  const warnedBackgroundCommands = new Set<string>();
+  pi.on("tool_call", async (event, _ctx) => {
+    if (isToolCallEventType("bash", event) && /\s&\s*$/.test(event.input.command)) {
+      if (warnedBackgroundCommands.has(event.input.command)) {
+        warnedBackgroundCommands.delete(event.input.command);
+        return;
+      }
+      warnedBackgroundCommands.add(event.input.command);
+      return {
+        block: true,
+        reason: "REJECTED: background '&' detected. Use tmux-bash instead.",
+      };
+    }
+  });
+
+  // Check tmux availability on session start and set remain-on-exit globally
+  // so windows persist even if their command exits before we can set the option per-window.
   pi.on("session_start", async (_event, ctx) => {
     if (!isTmuxAvailable()) {
       ctx.ui.notify(
         "tmux extension: Not running in tmux session (TMUX env not set)",
         "warning",
       );
+    } else {
+      await pi.exec("tmux", ["set-option", "-g", "remain-on-exit", "on"]);
     }
   });
 
@@ -388,7 +423,7 @@ export default function (pi: ExtensionAPI) {
           command: command || "exec bash",
           signal,
         });
-        const lockInfo = lockName ? ` Lock '${lockName}' created.` : "";
+        const lockInfo = lockName ? ` Use semaphore_wait('${lockName}') to wait for it to finish.` : "";
         const renameInfo = actualName !== requestedName ? ` (renamed from '${requestedName}' to avoid conflict)` : "";
         return {
           content: [
@@ -473,8 +508,26 @@ export default function (pi: ExtensionAPI) {
           };
         }
 
-        // Strip trailing empty lines
         let output = result.stdout.replace(/\n+$/, "");
+
+        // Dead panes often include a very large block of whitespace before the
+        // final "Pane is dead (...)" status line. Only normalize whitespace in
+        // that specific case.
+        const deadPaneMatch = output.match(/\nPane is dead \([^\n]+\)$/);
+        if (deadPaneMatch) {
+          output = output
+            .split("\n")
+            .reduce<string[]>((acc, line) => {
+              const isBlank = line.trim().length === 0;
+              const prevBlank =
+                acc.length > 0 && acc[acc.length - 1].trim().length === 0;
+              if (isBlank && prevBlank) return acc;
+              acc.push(line);
+              return acc;
+            }, [])
+            .join("\n")
+            .replace(/^\n+|\n+$/g, "");
+        }
 
         // Apply truncation
         const truncation = truncateTail(output, {
@@ -721,7 +774,7 @@ export default function (pi: ExtensionAPI) {
                         `Warning: The pi input box in window '${name}' contains text:\n\n` +
                         `  "${existingInput}"\n\n` +
                         `A human may be typing. The kill was NOT executed.\n` +
-                        `Retry tmux-kill if you still want to close this window.`,
+                        `Only retry tmux-kill if this is text YOU wrote.`,
                     },
                   ],
                   details: {
