@@ -150,7 +150,7 @@ export default function (pi: ExtensionAPI) {
     name: "tmux-send",
     label: "Tmux Send",
     description:
-      "Send text or keys to a tmux pane by lock name or pane id.",
+      "Send text or keys to a tmux pane by lock name or pane id. For workflows that wait on completion, pair with semaphore_wait on the same lock name.",
     parameters: tmuxSendParams,
     async execute(_toolCallId, params, signal) {
       const args = [

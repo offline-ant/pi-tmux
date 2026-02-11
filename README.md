@@ -26,7 +26,7 @@ pi -e git:github.com/offline-ant/pi-tmux
 |------|-------------|
 | `tmux-bash` | Create a new tmux pane with a lock name and execute a command (defaults to `bash`) |
 | `tmux-capture` | Capture output from a pane by lock name or pane id |
-| `tmux-send` | Send text or keys to a pane by lock name or pane id |
+| `tmux-send` | Send text or keys to a pane by lock name or pane id; for coordinated workflows, pair with `semaphore_wait` on the same lock name |
 | `tmux-kill` | Kill a pane by lock name or pane id |
 | `tmux-coding-agent` | Spawn a pi coding agent in a pane and return startup output |
 

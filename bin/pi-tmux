@@ -127,9 +127,9 @@ cmd_bash() {
   local lock_name
   lock_name="$(find_unique_lock_name "$safe_name")"
 
-  local command="${*:-exec bash}"
+  local command="${*:-bash}"
   local wrapped_command
-  wrapped_command="${command}; rm -f '$(lock_path "$lock_name")'; printf '%s\n' \"\${TMUX_PANE:-}\" > '$(idle_path "$lock_name")'"
+  wrapped_command="( ${command} ); status=\$?; rm -f '$(lock_path "$lock_name")'; printf '%s\n' \"\${TMUX_PANE:-}\" > '$(idle_path "$lock_name")'; exit \$status"
 
   local pane_id
   if ! pane_id="$(tmux new-window -n "$lock_name" -d -P -F '#{pane_id}' -e "PI_LOCK_NAME=$lock_name" -- bash -lc "$wrapped_command" 2>&1)"; then
@@ -140,11 +140,7 @@ cmd_bash() {
   printf '%s\n' "$pane_id" > "$(lock_path "$lock_name")"
   tmux set-option -g remain-on-exit on >/dev/null 2>&1 || true
 
-  if [[ "$lock_name" != "$safe_name" ]]; then
-    echo "Created '$lock_name' (deduped from '$safe_name')"
-  else
-    echo "Created '$lock_name'"
-  fi
+  echo "Created '$lock_name'"
   echo "Command: $command"
 }
 
@@ -222,6 +218,10 @@ cmd_send() {
   local enter_suffix=""
   [[ $enter -eq 1 ]] && enter_suffix=" [Enter]"
   echo "Sent to '$display_target': $text$enter_suffix"
+
+  if [[ "$target" != %* ]]; then
+    echo "IMPORTANT: To wait for completion, call semaphore_wait with name '$display_target'."
+  fi
 }
 
 cmd_kill() {
@@ -272,14 +272,17 @@ cmd_coding_agent() {
     command="pi $pi_args"
   fi
 
+  local wrapped_command
+  wrapped_command="( ${command} ); status=\$?; rm -f '$(lock_path "$lock_name")'; printf '%s\n' \"\${TMUX_PANE:-}\" > '$(idle_path "$lock_name")'; exit \$status"
+
   local pane_id
-  if ! pane_id="$(tmux new-window -n "$lock_name" -d -P -F '#{pane_id}' -e "PI_LOCK_NAME=$lock_name" -c "$folder" -- bash -lc "$command" 2>&1)"; then
+  if ! pane_id="$(tmux new-window -n "$lock_name" -d -P -F '#{pane_id}' -e "PI_LOCK_NAME=$lock_name" -c "$folder" -- bash -lc "$wrapped_command" 2>&1)"; then
     echo "error: failed to create coding-agent pane: $pane_id" >&2
     return 1
   fi
 
-  # Create immediate lock->pane mapping so send/capture/kill work before first prompt.
-  printf '%s\n' "$pane_id" > "$(idle_path "$lock_name")"
+  # Create immediate lock->pane mapping so send/capture/kill/wait work before first prompt.
+  printf '%s\n' "$pane_id" > "$(lock_path "$lock_name")"
 
   tmux set-option -g remain-on-exit on >/dev/null 2>&1 || true
 
@@ -308,11 +311,7 @@ cmd_coding_agent() {
 
   output="$(printf '%s\n' "$output" | strip_startup_help)"
 
-  if [[ "$lock_name" != "$safe_name" ]]; then
-    echo "Pi agent '$lock_name' started in $folder (deduped from '$safe_name')."
-  else
-    echo "Pi agent '$lock_name' started in $folder."
-  fi
+  echo "Pi agent '$lock_name' started in $folder."
   echo
   echo "Startup output:"
   printf '%s\n' "${output:-'(empty)'}"
