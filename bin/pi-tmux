@@ -129,7 +129,7 @@ cmd_bash() {
 
   local command="${*:-bash}"
   local wrapped_command
-  wrapped_command="( ${command} ); status=\$?; rm -f '$(lock_path "$lock_name")'; printf '%s\n' \"\${TMUX_PANE:-}\" > '$(idle_path "$lock_name")'; exit \$status"
+  wrapped_command="if ( ${command} ); then status=0; else status=\$?; fi; rm -f '$(lock_path "$lock_name")'; printf '%s\n' \"\${TMUX_PANE:-}\" > '$(idle_path "$lock_name")'; exit \$status"
 
   local pane_id
   if ! pane_id="$(tmux new-window -n "$lock_name" -d -P -F '#{pane_id}' -e "PI_LOCK_NAME=$lock_name" -- bash -lc "$wrapped_command" 2>&1)"; then
@@ -273,7 +273,7 @@ cmd_coding_agent() {
   fi
 
   local wrapped_command
-  wrapped_command="( ${command} ); status=\$?; rm -f '$(lock_path "$lock_name")'; printf '%s\n' \"\${TMUX_PANE:-}\" > '$(idle_path "$lock_name")'; exit \$status"
+  wrapped_command="if ( ${command} ); then status=0; else status=\$?; fi; rm -f '$(lock_path "$lock_name")'; printf '%s\n' \"\${TMUX_PANE:-}\" > '$(idle_path "$lock_name")'; exit \$status"
 
   local pane_id
   if ! pane_id="$(tmux new-window -n "$lock_name" -d -P -F '#{pane_id}' -e "PI_LOCK_NAME=$lock_name" -c "$folder" -- bash -lc "$wrapped_command" 2>&1)"; then
