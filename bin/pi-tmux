@@ -144,6 +144,24 @@ cmd_bash() {
   echo "Command: $command"
 }
 
+is_pane_dead() {
+  local pane="${1:-}"
+  [[ -n "$pane" ]] || return 1
+
+  local dead
+  dead="$(tmux display-message -p -t "$pane" '#{pane_dead}' 2>/dev/null || true)"
+  [[ "$dead" == "1" ]]
+}
+
+cleanup_target_mapping() {
+  local target="${1:-}"
+  if [[ "$target" != %* ]]; then
+    local safe_name
+    safe_name="$(sanitize_name "$target")"
+    rm -f -- "$(lock_path "$safe_name")" "$(idle_path "$safe_name")"
+  fi
+}
+
 cmd_capture() {
   require_tmux
 
@@ -160,9 +178,14 @@ cmd_capture() {
   # Match previous TS behavior: strip startup controls block and [Extensions] block.
   output="$(printf '%s\n' "$output" | strip_startup_help)"
 
+  local pane_dead=0
+  if is_pane_dead "$pane"; then
+    pane_dead=1
+  fi
+
   # Match previous TS behavior: dead panes often contain huge whitespace blocks
   # before the final "Pane is dead (...)" line. Normalize whitespace only then.
-  if printf '%s\n' "$output" | grep -q "Pane is dead ("; then
+  if (( pane_dead )) || printf '%s\n' "$output" | grep -q "Pane is dead ("; then
     output="$(printf '%s\n' "$output" | awk '
       { lines[NR] = $0 }
       END {
@@ -180,6 +203,11 @@ cmd_capture() {
         }
       }
     ')"
+  fi
+
+  if (( pane_dead )); then
+    tmux kill-pane -t "$pane" >/dev/null 2>&1 || true
+    cleanup_target_mapping "$target"
   fi
 
   printf '%s\n' "$output"
@@ -239,7 +267,7 @@ cmd_kill() {
   if [[ "$target" != %* ]]; then
     local safe_name
     safe_name="$(sanitize_name "$target")"
-    rm -f -- "$(lock_path "$safe_name")" "$(idle_path "$safe_name")"
+    cleanup_target_mapping "$safe_name"
     display_target="$safe_name"
   else
     display_target="$pane"
