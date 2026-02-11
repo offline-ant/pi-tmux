@@ -2,6 +2,7 @@
 set -euo pipefail
 
 LOCK_DIR="/tmp/pi-semaphores"
+IDLE_PREFIX="idle:"
 
 sanitize_name() {
   printf '%s' "${1:-}" | tr -cd '[:alnum:]._-'
@@ -23,34 +24,15 @@ lock_path() {
   printf '%s/%s' "$LOCK_DIR" "$1"
 }
 
-find_unique_window_name() {
-  local base="$1"
-  local existing
-  existing="$(tmux list-windows -F '#{window_name}' 2>/dev/null || true)"
-
-  if ! grep -Fxq "$base" <<<"$existing"; then
-    printf '%s' "$base"
-    return
-  fi
-
-  local n=2
-  local candidate
-  while (( n < 1000 )); do
-    candidate="${base}-${n}"
-    if ! grep -Fxq "$candidate" <<<"$existing"; then
-      printf '%s' "$candidate"
-      return
-    fi
-    n=$((n + 1))
-  done
-
-  printf '%s-%s' "$base" "$$"
+idle_path() {
+  printf '%s/%s%s' "$LOCK_DIR" "$IDLE_PREFIX" "$1"
 }
 
 find_unique_lock_name() {
   local base="$1"
   local candidate="$base"
   local n=2
+
   while [[ -e "$(lock_path "$candidate")" ]]; do
     candidate="${base}-${n}"
     n=$((n + 1))
@@ -59,31 +41,45 @@ find_unique_lock_name() {
       break
     fi
   done
+
   printf '%s' "$candidate"
 }
 
-create_tmux_lock() {
-  local window_name="$1"
-  ensure_lock_dir
-  local unique
-  unique="$(find_unique_lock_name "tmux:$(sanitize_name "$window_name")")"
-  (
-    set -o noclobber
-    printf '%s\n' "$unique" > "$(lock_path "$unique")"
-  ) 2>/dev/null || {
-    echo "error: failed to create lock: $unique" >&2
-    return 1
-  }
-  printf '%s' "$unique"
-}
+resolve_pane() {
+  local target="${1:-}"
+  [[ -n "$target" ]] || { echo "error: missing target" >&2; return 1; }
 
-window_exists() {
-  local name="$1"
-  tmux list-windows -F '#{window_name}' | grep -Fxq "$name"
+  if [[ "$target" == %* ]]; then
+    printf '%s' "$target"
+    return
+  fi
+
+  local name
+  name="$(sanitize_name "$target")"
+  [[ -n "$name" ]] || { echo "error: invalid target name" >&2; return 1; }
+
+  local path
+  path="$(lock_path "$name")"
+  if [[ ! -e "$path" ]]; then
+    path="$(idle_path "$name")"
+  fi
+
+  if [[ ! -e "$path" ]]; then
+    echo "error: lock '$name' not found" >&2
+    return 1
+  fi
+
+  local pane
+  pane="$(head -n 1 "$path" 2>/dev/null || true)"
+  if [[ -z "$pane" || "$pane" != %* ]]; then
+    echo "error: lock '$name' does not contain a valid pane id" >&2
+    return 1
+  fi
+
+  printf '%s' "$pane"
 }
 
 strip_startup_help() {
-  # Remove control help block after "pi vX.Y.Z" and [Extensions] block.
   awk '
     BEGIN { skip_controls=0; seen_version=0; skip_ext=0 }
     {
@@ -118,61 +114,88 @@ strip_startup_help() {
 
 cmd_bash() {
   require_tmux
+  ensure_lock_dir
 
   local requested_name="${1:-}"
   shift || true
-  [[ -n "$requested_name" ]] || { echo "error: bash requires <name>" >&2; return 1; }
+  [[ -n "$requested_name" ]] || { echo "error: bash requires <lock-name>" >&2; return 1; }
 
-  local command="${*:-exec bash}"
-  local actual_name
-  actual_name="$(find_unique_window_name "$requested_name")"
+  local safe_name
+  safe_name="$(sanitize_name "$requested_name")"
+  [[ -n "$safe_name" ]] || { echo "error: invalid lock name" >&2; return 1; }
 
   local lock_name
-  lock_name="$(create_tmux_lock "$actual_name")"
+  lock_name="$(find_unique_lock_name "$safe_name")"
 
+  local command="${*:-exec bash}"
   local wrapped_command
-  wrapped_command="${command}; rm -f '$(lock_path "$lock_name")'"
+  wrapped_command="${command}; rm -f '$(lock_path "$lock_name")'; printf '%s\n' \"\${TMUX_PANE:-}\" > '$(idle_path "$lock_name")'"
 
-  local window_id
-  if ! window_id="$(tmux new-window -n "$actual_name" -d -P -F '#{window_id}' -e "PI_LOCK_NAME=$(sanitize_name "$actual_name")" -- bash -lc "$wrapped_command" 2>&1)"; then
-    rm -f -- "$(lock_path "$lock_name")"
-    echo "error: failed to create tmux window: $window_id" >&2
+  local pane_id
+  if ! pane_id="$(tmux new-window -d -P -F '#{pane_id}' -e "PI_LOCK_NAME=$lock_name" -- bash -lc "$wrapped_command" 2>&1)"; then
+    echo "error: failed to create tmux pane: $pane_id" >&2
     return 1
   fi
 
+  printf '%s\n' "$pane_id" > "$(lock_path "$lock_name")"
   tmux set-option -g remain-on-exit on >/dev/null 2>&1 || true
 
-  if [[ "$actual_name" != "$requested_name" ]]; then
-    echo "Created tmux window '$actual_name' (renamed from '$requested_name')"
+  if [[ "$lock_name" != "$safe_name" ]]; then
+    echo "Created '$lock_name' (deduped from '$safe_name')"
   else
-    echo "Created tmux window '$actual_name'"
+    echo "Created '$lock_name'"
   fi
   echo "Command: $command"
-  echo "Lock: $lock_name"
 }
 
 cmd_capture() {
   require_tmux
 
-  local name="${1:-}"
+  local target="${1:-}"
   local lines="${2:-500}"
-  [[ -n "$name" ]] || { echo "error: capture requires <name>" >&2; return 1; }
+  [[ -n "$target" ]] || { echo "error: capture requires <lock-name|pane-id>" >&2; return 1; }
 
-  if ! window_exists "$name"; then
-    echo "error: window '$name' not found" >&2
-    return 1
+  local pane
+  pane="$(resolve_pane "$target")"
+
+  local output
+  output="$(tmux capture-pane -t "$pane" -p -S "-${lines}")"
+
+  # Match previous TS behavior: strip startup controls block and [Extensions] block.
+  output="$(printf '%s\n' "$output" | strip_startup_help)"
+
+  # Match previous TS behavior: dead panes often contain huge whitespace blocks
+  # before the final "Pane is dead (...)" line. Normalize whitespace only then.
+  if printf '%s\n' "$output" | grep -q "Pane is dead ("; then
+    output="$(printf '%s\n' "$output" | awk '
+      { lines[NR] = $0 }
+      END {
+        start = 1
+        while (start <= NR && lines[start] ~ /^[[:space:]]*$/) start++
+        end = NR
+        while (end >= start && lines[end] ~ /^[[:space:]]*$/) end--
+
+        prevBlank = 0
+        for (i = start; i <= end; i++) {
+          isBlank = (lines[i] ~ /^[[:space:]]*$/)
+          if (isBlank && prevBlank) continue
+          print lines[i]
+          prevBlank = isBlank
+        }
+      }
+    ')"
   fi
 
-  tmux capture-pane -t "${name}.0" -p -S "-${lines}"
+  printf '%s\n' "$output"
 }
 
 cmd_send() {
   require_tmux
 
   local enter=1
-  local name="${1:-}"
+  local target="${1:-}"
   shift || true
-  [[ -n "$name" ]] || { echo "error: send requires <name> <text...>" >&2; return 1; }
+  [[ -n "$target" ]] || { echo "error: send requires <lock-name|pane-id> <text...>" >&2; return 1; }
 
   if [[ "${1:-}" == "--no-enter" ]]; then
     enter=0
@@ -182,46 +205,47 @@ cmd_send() {
   [[ $# -gt 0 ]] || { echo "error: send requires text" >&2; return 1; }
 
   local text="$*"
-
-  if ! window_exists "$name"; then
-    echo "error: window '$name' not found" >&2
-    return 1
-  fi
+  local pane
+  pane="$(resolve_pane "$target")"
 
   if (( enter )); then
-    tmux send-keys -t "$name" "$text" Enter
+    tmux send-keys -t "$pane" "$text" Enter
   else
-    tmux send-keys -t "$name" "$text"
+    tmux send-keys -t "$pane" "$text"
+  fi
+
+  local display_target="$target"
+  if [[ "$target" == %* ]]; then
+    display_target="$pane"
   fi
 
   local enter_suffix=""
   [[ $enter -eq 1 ]] && enter_suffix=" [Enter]"
-  echo "Sent to '$name': $text$enter_suffix"
+  echo "Sent to '$display_target': $text$enter_suffix"
 }
 
 cmd_kill() {
   require_tmux
 
-  local name="${1:-}"
-  [[ -n "$name" ]] || { echo "error: kill requires <name>" >&2; return 1; }
+  local target="${1:-}"
+  [[ -n "$target" ]] || { echo "error: kill requires <lock-name|pane-id>" >&2; return 1; }
 
-  if ! window_exists "$name"; then
-    echo "Window '$name' not found (may have already exited)."
-    return 0
+  local pane
+  pane="$(resolve_pane "$target")"
+
+  tmux kill-pane -t "$pane"
+
+  local display_target="$target"
+  if [[ "$target" != %* ]]; then
+    local safe_name
+    safe_name="$(sanitize_name "$target")"
+    rm -f -- "$(lock_path "$safe_name")" "$(idle_path "$safe_name")"
+    display_target="$safe_name"
+  else
+    display_target="$pane"
   fi
 
-  tmux kill-window -t "$name"
-
-  # Best-effort: release tmux lock variants for this window.
-  local base
-  base="tmux:$(sanitize_name "$name")"
-  rm -f -- "$(lock_path "$base")"
-  local n
-  for n in $(seq 2 999); do
-    rm -f -- "$(lock_path "${base}-${n}")"
-  done
-
-  echo "Killed tmux window '$name'."
+  echo "Killed '$display_target'."
 }
 
 cmd_coding_agent() {
@@ -231,8 +255,12 @@ cmd_coding_agent() {
   local folder="${2:-}"
   shift 2 || true
 
-  [[ -n "$requested_name" ]] || { echo "error: coding-agent requires <name> <folder> [pi args...]" >&2; return 1; }
-  [[ -n "$folder" ]] || { echo "error: coding-agent requires <name> <folder> [pi args...]" >&2; return 1; }
+  [[ -n "$requested_name" ]] || { echo "error: coding-agent requires <lock-name> <folder> [pi args...]" >&2; return 1; }
+  [[ -n "$folder" ]] || { echo "error: coding-agent requires <lock-name> <folder> [pi args...]" >&2; return 1; }
+
+  local safe_name
+  safe_name="$(sanitize_name "$requested_name")"
+  [[ -n "$safe_name" ]] || { echo "error: invalid lock name" >&2; return 1; }
 
   local pi_args="$*"
   local command="pi"
@@ -240,24 +268,22 @@ cmd_coding_agent() {
     command="pi $pi_args"
   fi
 
-  local actual_name
-  actual_name="$(find_unique_window_name "$requested_name")"
-
-  if ! tmux new-window -n "$actual_name" -d -e "PI_LOCK_NAME=$(sanitize_name "$actual_name")" -c "$folder" -- bash -lc "$command"; then
-    echo "error: failed to create coding-agent window" >&2
+  local pane_id
+  if ! pane_id="$(tmux new-window -d -P -F '#{pane_id}' -e "PI_LOCK_NAME=$safe_name" -c "$folder" -- bash -lc "$command" 2>&1)"; then
+    echo "error: failed to create coding-agent pane: $pane_id" >&2
     return 1
   fi
 
   tmux set-option -g remain-on-exit on >/dev/null 2>&1 || true
 
-  echo "Window '$actual_name' created. Waiting for pi to start..." >&2
+  echo "Pane '$pane_id' created. Waiting for pi to start..." >&2
 
   local start now elapsed
   start="$(date +%s)"
   local output=""
 
   while true; do
-    output="$(tmux capture-pane -t "${actual_name}.0" -p -S -500 || true)"
+    output="$(tmux capture-pane -t "$pane_id" -p -S -500 || true)"
     local non_empty
     non_empty="$(printf '%s\n' "$output" | awk 'NF{c++} END{print c+0}')"
     if (( non_empty > 10 )); then
@@ -275,31 +301,27 @@ cmd_coding_agent() {
 
   output="$(printf '%s\n' "$output" | strip_startup_help)"
 
-  if [[ "$actual_name" != "$requested_name" ]]; then
-    echo "Pi agent '$actual_name' (renamed from '$requested_name') started in $folder."
-  else
-    echo "Pi agent '$actual_name' started in $folder."
-  fi
+  echo "Pi agent '$safe_name' started in $folder."
   echo
   echo "Startup output:"
   printf '%s\n' "${output:-'(empty)'}"
   echo
-  echo "Use send '$actual_name' ... and wait on lock '$(sanitize_name "$actual_name")'."
+  echo "Use send/capture/kill with '$safe_name'."
 }
 
 cmd_list() {
   require_tmux
-  tmux list-windows -F '#{window_name}: #{window_active}'
+  tmux list-panes -a -F '#{pane_id} #{session_name}:#{window_index}.#{pane_index} #{pane_current_command}'
 }
 
 usage() {
   cat <<'EOF'
 Usage:
-  pi-tmux bash <name> [command...]
-  pi-tmux capture <name> [lines]
-  pi-tmux send <name> [--no-enter] <text...>
-  pi-tmux kill <name>
-  pi-tmux coding-agent <name> <folder> [pi args...]
+  pi-tmux bash <lock-name> [command...]
+  pi-tmux capture <lock-name|pane-id> [lines]
+  pi-tmux send <lock-name|pane-id> [--no-enter] <text...>
+  pi-tmux kill <lock-name|pane-id>
+  pi-tmux coding-agent <lock-name> <folder> [pi args...]
   pi-tmux list
 EOF
 }
