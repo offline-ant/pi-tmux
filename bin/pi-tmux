@@ -227,6 +227,12 @@ cmd_bash() {
 
   echo "Created '$lock_name'"
   echo "Command: $command"
+
+  if [[ "$lock_name" != "$safe_name" ]]; then
+    echo
+    echo "⚠️  WARNING: Lock name '$safe_name' was already in use — renamed to '$lock_name'."
+    echo "   Use semaphore_wait('$lock_name') to wait for this pane, NOT '$safe_name'."
+  fi
 }
 
 is_pane_dead() {
@@ -466,6 +472,12 @@ cmd_coding_agent() {
   printf '%s\n' "${output:-'(empty)'}"
   echo
   echo "Use send/capture/kill with '$lock_name'."
+
+  if [[ "$lock_name" != "$safe_name" ]]; then
+    echo
+    echo "⚠️  WARNING: Lock name '$safe_name' was already in use — renamed to '$lock_name'."
+    echo "   Use semaphore_wait('$lock_name') to wait for this pane, NOT '$safe_name'."
+  fi
 }
 
 cmd_list() {
