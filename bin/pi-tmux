@@ -373,8 +373,7 @@ cmd_send() {
   echo "Sent to '$display_target': $text$enter_suffix"
 
   if [[ "$target" != %* ]]; then
-    echo "IMPORTANT: To wait for completion, call semaphore_wait with name '$display_target'."
-    echo "If this command launches a nested pi (for example ../user-emulation/run), wait on the inner agent lock instead (for example the username lock)."
+    echo "To wait, call semaphore_wait('$display_target')."
   fi
 }
 

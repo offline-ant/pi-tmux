@@ -26,7 +26,7 @@ pi -e git:github.com/offline-ant/pi-tmux
 |------|-------------|
 | `tmux-bash` | Create a new tmux pane with a lock name and execute a command (defaults to `bash`) |
 | `tmux-capture` | Capture output from a pane by lock name or pane id |
-| `tmux-send` | Send text or keys to a pane by lock name or pane id; for coordinated workflows, pair with `semaphore_wait` on the same lock name |
+| `tmux-send` | Send text or keys to a pane by lock name or pane id; for coordinated workflows, pair with `semaphore_wait` on the same lock name (unless the command launches a nested pi, then wait on the inner lock) |
 | `tmux-kill` | Kill a pane by lock name or pane id |
 | `tmux-coding-agent` | Spawn a pi coding agent in a pane and return startup output |
 
@@ -52,6 +52,15 @@ Spawn a coding agent:
 1. `tmux-coding-agent` with name `reviewer`, folder `../project`
 2. `tmux-send` with name `reviewer` and text `analyze lint failures`
 3. `semaphore_wait` with name `reviewer`
+
+## Safety Policy
+
+This extension blocks `git restore` when invoked through:
+- built-in `bash`
+- `tmux-bash`
+- `tmux-send`
+
+Blocked calls are denied before execution. Other work might be in progress; ask the user to resolve the issue if necessary.
 
 ## Commands
 
