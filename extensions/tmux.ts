@@ -79,6 +79,13 @@ const tmuxCodingAgentParams = Type.Object({
         "Additional pi CLI arguments. To launch a codex agent, use '--provider openai-codex --model gpt-5.3-codex'. For thinking mode, use '--thinking high'.",
     }),
   ),
+  contextAlertPercent: Type.Optional(
+    Type.Number({
+      description:
+        "Context usage percentage (1-100) at which to release a <name>:context lock. " +
+        "Use semaphore_wait with the context lock name to be notified when the agent's context is filling up.",
+    }),
+  ),
 });
 export type TmuxCodingAgentInput = Static<typeof tmuxCodingAgentParams>;
 
@@ -210,6 +217,9 @@ export default function (pi: ExtensionAPI) {
     parameters: tmuxCodingAgentParams,
     async execute(_toolCallId, params, signal) {
       const args = ["coding-agent", params.name, params.folder];
+      if (params.contextAlertPercent !== undefined) {
+        args.push("--context-alert", String(params.contextAlertPercent));
+      }
       if (params.piArgs) {
         args.push(params.piArgs);
       }
