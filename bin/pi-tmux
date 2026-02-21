@@ -3,6 +3,7 @@ set -euo pipefail
 
 LOCK_DIR="/tmp/pi-semaphores"
 STATE_DIR="/tmp/pi-tmux-state"
+STREAM_DIR="/tmp/pi-tmux-streams"
 IDLE_PREFIX="idle:"
 
 sanitize_name() {
@@ -285,11 +286,67 @@ is_pane_dead() {
   [[ "$dead" == "1" ]]
 }
 
+stream_path() {
+  printf '%s/%s' "$STREAM_DIR" "$1"
+}
+
+ensure_stream_dir() {
+  mkdir -p "$STREAM_DIR"
+  chmod 0777 "$STREAM_DIR" 2>/dev/null || true
+}
+
+# Find a unique watch lock name: <name>:watch, <name>:watch-2, ...
+find_unique_watch_lock() {
+  local name="$1"
+  local candidate="${name}:watch"
+  local n=2
+
+  while [[ -e "$(lock_path "$candidate")" ]]; do
+    candidate="${name}:watch-${n}"
+    n=$((n + 1))
+    if (( n > 1000 )); then
+      candidate="${name}:watch-$$"
+      break
+    fi
+  done
+
+  printf '%s' "$candidate"
+}
+
+# Clean up watch locks and stream infrastructure for a pane
+cleanup_watch_state() {
+  local name="${1:-}"
+  [[ -n "$name" ]] || return 0
+
+  # Remove all watch locks for this pane (<name>:watch, <name>:watch-2, ...)
+  local f
+  for f in "$LOCK_DIR/${name}:watch" "$LOCK_DIR/${name}:watch-"*; do
+    [[ -e "$f" ]] && rm -f -- "$f"
+  done
+
+  # Stop pipe-pane and remove stream file
+  local stream
+  stream="$(stream_path "$name")"
+  if [[ -e "$stream" ]]; then
+    # Resolve pane to stop pipe-pane (best-effort, pane may already be dead)
+    local pane
+    pane="$(resolve_pane "$name" 2>/dev/null || true)"
+    if [[ -n "$pane" ]]; then
+      tmux pipe-pane -t "$pane" 2>/dev/null || true
+    fi
+    rm -f -- "$stream"
+  fi
+
+  # Kill any lingering watcher processes for this stream
+  pkill -f "tail -f $(stream_path "$name")" 2>/dev/null || true
+}
+
 cleanup_target_mapping() {
   local target="${1:-}"
   if [[ "$target" != %* ]]; then
     local safe_name
     safe_name="$(sanitize_name "$target")"
+    cleanup_watch_state "$safe_name"
     rm -f -- "$(lock_path "$safe_name")" "$(idle_path "$safe_name")"
     # Clean up context alert lock if it exists
     rm -f -- "$(lock_path "${safe_name}:context")"
@@ -564,6 +621,76 @@ cmd_coding_agent() {
   fi
 }
 
+cmd_watch() {
+  require_tmux
+  ensure_lock_dir
+  ensure_stream_dir
+
+  local target="${1:-}"
+  local pattern="${2:-}"
+  [[ -n "$target" ]] || { echo "error: watch requires <lock-name> <pattern>" >&2; return 1; }
+  [[ -n "$pattern" ]] || { echo "error: watch requires <lock-name> <pattern>" >&2; return 1; }
+
+  # Watch only works with named panes (need a stable name for lock/stream)
+  [[ "$target" != %* ]] || { echo "error: watch requires a lock name, not a pane id" >&2; return 1; }
+
+  local safe_name
+  safe_name="$(sanitize_name "$target")"
+  [[ -n "$safe_name" ]] || { echo "error: invalid target name" >&2; return 1; }
+
+  local pane
+  pane="$(resolve_pane "$target")"
+
+  local watch_lock
+  watch_lock="$(find_unique_watch_lock "$safe_name")"
+
+  local stream
+  stream="$(stream_path "$safe_name")"
+
+  # Check if the pattern already matches in the current buffer
+  local existing
+  existing="$(tmux capture-pane -t "$pane" -p -S -500 2>/dev/null || true)"
+  existing="$(printf '%s\n' "$existing" | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g')"
+  if printf '%s\n' "$existing" | grep -qE "$pattern" 2>/dev/null; then
+    echo "Pattern already matched in existing output. No watch needed."
+    return 0
+  fi
+
+  # Create the watch lock
+  printf '%s\n' "$pane" > "$(lock_path "$watch_lock")"
+
+  # Set up pipe-pane → stream file. Always re-set (no -o) in case a previous
+  # pipe died. Replaces any existing pipe, which is fine — all watchers read
+  # from the same stream file via tail -f regardless.
+  tmux pipe-pane -O -t "$pane" "cat >> '${stream}'"
+
+  # Ensure stream file exists (pipe-pane creates it on first write, but tail -f needs it now)
+  touch "$stream"
+
+  # Spawn watcher: tail -f | strip ANSI | grep -m1 → release lock
+  # Uses process substitution so grep is not in the pipeline — when grep exits
+  # execution continues immediately to rm. tail/sed linger until next write
+  # triggers SIGPIPE, then self-clean.
+  local watcher_script="${STREAM_DIR}/${watch_lock}.sh"
+  local watch_lock_path
+  watch_lock_path="$(lock_path "$watch_lock")"
+
+  cat > "$watcher_script" <<'WATCHER_EOF'
+#!/usr/bin/env bash
+stream="$1"; lock="$2"; pattern="$3"; self="$4"
+grep --line-buffered -m1 -qE "$pattern" \
+  < <(tail -f "$stream" \
+    | sed -u $'s/\x1b\\[[0-9;]*[a-zA-Z]//g; s/\x1b\\][^\x07]*\x07//g; s/\x1b(B//g')
+rm -f "$lock" "$self"
+WATCHER_EOF
+  chmod +x "$watcher_script"
+  nohup bash "$watcher_script" "$stream" "$watch_lock_path" "$pattern" "$watcher_script" >/dev/null 2>&1 &
+  disown
+
+  echo "Watch set on '$safe_name' for /$pattern/."
+  echo "semaphore_wait on lock '$watch_lock' to be notified."
+}
+
 cmd_list() {
   require_tmux
   tmux list-panes -a -F '#{pane_id} #{session_name}:#{window_index}.#{pane_index} #{pane_current_command}'
@@ -576,6 +703,7 @@ Usage:
   pi-tmux capture <lock-name|pane-id> [lines]
   pi-tmux send <lock-name|pane-id> [--no-enter] <text...>
   pi-tmux kill <lock-name|pane-id>
+  pi-tmux watch <lock-name> <pattern>
   pi-tmux coding-agent <lock-name> <folder> [pi args...]
   pi-tmux list
 EOF
@@ -590,6 +718,7 @@ main() {
     capture) cmd_capture "$@" ;;
     send) cmd_send "$@" ;;
     kill) cmd_kill "$@" ;;
+    watch) cmd_watch "$@" ;;
     coding-agent) cmd_coding_agent "$@" ;;
     list) cmd_list "$@" ;;
     -h|--help|help|"") usage ;;

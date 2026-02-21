@@ -44,6 +44,11 @@ const tmuxCaptureParams = Type.Object({
   lines: Type.Optional(
     Type.Number({ description: "Number of lines to capture (default: 500)" }),
   ),
+  watch: Type.Optional(
+    Type.String({
+      description: "Regex pattern — sets up a semaphore_wait lock that releases when the pattern appears in new pane output.",
+    }),
+  ),
 });
 export type TmuxCaptureInput = Static<typeof tmuxCaptureParams>;
 
@@ -136,7 +141,7 @@ export default function (pi: ExtensionAPI) {
     async execute(_toolCallId, params, signal) {
       const args = ["capture", params.name, String(params.lines ?? 500)];
       const result = await runTmux(pi, args, signal);
-      const text = outputText(result.stdout, result.stderr);
+      let text = outputText(result.stdout, result.stderr);
 
       if (result.code !== 0) {
         return {
@@ -146,9 +151,26 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
+      // Set up a watch if requested
+      let watchLock: string | undefined;
+      if (params.watch) {
+        const watchArgs = ["watch", params.name, params.watch];
+        const watchResult = await runTmux(pi, watchArgs, signal);
+        const watchText = watchResult.stdout.trim();
+
+        if (watchResult.code !== 0) {
+          text += `\n\n⚠️ Watch setup failed: ${outputText(watchResult.stdout, watchResult.stderr)}`;
+        } else {
+          // Extract the lock name from the watch output
+          const match = watchText.match(/lock '([^']+)'/);
+          watchLock = match?.[1];
+          text += `\n\n${watchText}`;
+        }
+      }
+
       return {
         content: [{ type: "text", text }],
-        details: { code: result.code, args },
+        details: { code: result.code, args, watchLock },
       };
     },
   });
