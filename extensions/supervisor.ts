@@ -3,8 +3,8 @@
  *
  * Usage:  /supervise <task description>
  *
- * Creates .dev/<id>/task.md with the task and guidance, then tells the
- * current agent to spawn a worker and keep it from going dormant.
+ * Creates ./dev/scratch/<id>/task.md with the task and guidance, then tells the
+ * current agent to spawn a 'main' agent and keep it from going dormant.
  */
 
 import * as fs from "node:fs";
@@ -35,12 +35,8 @@ export default function (pi: ExtensionAPI) {
       "Spawn a supervised tmux coding agent. Usage: /supervise <task>",
     handler: async (args, ctx) => {
       const task = (args ?? "").trim();
-      if (!task) {
-        ctx.ui.notify("Usage: /supervise <task description>", "error");
-        return;
-      }
 
-      const devBase = path.join(ctx.cwd, ".dev");
+      const devBase = path.join(process.cwd(), "dev", "scratch");
       const id = uniqueId(devBase);
       const devDir = path.join(devBase, id);
       const taskFile = path.join(devDir, "task.md");
@@ -49,30 +45,49 @@ export default function (pi: ExtensionAPI) {
       fs.writeFileSync(
         taskFile,
         `
-${task}
+${task || "(supervisor will fill this in from the conversation)"}
 
-You are the lead agent. Use tmux coding agent - have them write files to .dev/${id}.
-Follow this general outline - but tweak it for your needs:
+You are the lead agent. Use tmux coding agents — have them write files to ./dev/scratch/${id}.
+
+**Priority: architectural quality over speed.** You have the power to spawn
+sub-agents. Use that power to investigate properly, explore alternatives, and
+build a well-structured solution. Dependencies are not automatically correct —
+we can vendor, replace, or change APIs if that's the right thing to do. Do not
+rush to the quickest fix — take the time to get the design right.
+
+Follow this general outline — but tweak it for your needs:
 
 \`\`\`
-parellel investigate;
+parallel investigate;
 while plan.incomplete {
     plan;
     review;
 };
-parellel execute;
+parallel execute;
 \`\`\`
 
-do not stop until task is complete.
-When your context is >70% full full write down your status and start a sibling tmux-coding agent
-that continues your work then stop.`,
+Do not stop until the task is complete.
+When your context is >78% full, write down your status and start a sibling tmux-coding-agent
+that continues your work, then stop.`,
       );
 
-      const relPath = `.dev/${id}/task.md`;
+      const relPath = path.join(devDir, "task.md");
       ctx.ui.notify(`Task written to ${relPath}`, "info");
 
+      const supervisorMessage = task
+        ? `read '${relPath}' — spawn a tmux-coding-agent named 'main' to do this task.`
+        : `Write our discussed plan to '${relPath}' (task summary, steps, key decisions), then spawn a tmux-coding-agent named 'main' to execute it.`;
+
       pi.sendUserMessage(
-        `read '${relPath}' - spawn a tmux-coding-agent to do this task; your only job is to observe the main agent and prevent it from going dormant, and to ensure it follows the >70% context rule`,
+        `${supervisorMessage} Your jobs as supervisor:
+1. Observe the main agent and prevent it from going dormant.
+2. Ensure it follows the >78% context rule.
+3. **Ensure architectural quality** — if the main agent is rushing to a quick fix instead of building a well-structured solution, nudge it to slow down, investigate alternatives, and get the design right. Dependencies are not automatically correct — vendoring, replacing, or changing APIs is on the table if it's the right call. That's the whole point of this supervised workflow.
+4. **Ensure the main agent commits** — when the task is complete, make sure the main agent commits its work before stopping.
+
+Do NOT tell the main agent it has a supervisor.
+
+If you see text appearing in your input buffer (partially typed text), it likely means the user is typing a message to you directly. Just do a semaphore_wait to block and let them finish typing and submit their message.`,
       );
     },
   });

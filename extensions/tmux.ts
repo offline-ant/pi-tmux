@@ -235,7 +235,8 @@ export default function (pi: ExtensionAPI) {
     name: "tmux-coding-agent",
     label: "Tmux Coding Agent",
     description:
-      "Spawn a pi coding agent in a tmux pane using the given lock name and folder.",
+      "Spawn a pi coding agent in a tmux pane using the given lock name and folder. " +
+      "Send work via tmux-send('<name>'), wait for completion via semaphore_wait('<name>').",
     parameters: tmuxCodingAgentParams,
     async execute(_toolCallId, params, signal) {
       const args = ["coding-agent", params.name, params.folder];

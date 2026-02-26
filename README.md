@@ -65,6 +65,7 @@ Blocked calls are denied before execution. Other work might be in progress; ask 
 ## Commands
 
 - `/tmux-list` lists active tmux panes
+- `/supervise <task>` spawns a supervised coding agent workflow: writes a task file to `./dev/scratch/<id>/task.md`, then turns the current agent into a supervisor that spawns a 'main' agent to do the work. The supervisor keeps the main agent on track, enforces the >78% context handoff rule, and ensures **architectural quality over speed** — nudging the main agent to investigate properly and build well-structured solutions rather than rushing to quick fixes. The main agent is unaware it has a supervisor.
 
 ## License
 

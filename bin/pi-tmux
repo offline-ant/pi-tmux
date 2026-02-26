@@ -607,7 +607,7 @@ cmd_coding_agent() {
   echo "Startup output:"
   printf '%s\n' "${output:-'(empty)'}"
   echo
-  echo "Use send/capture/kill with '$lock_name'."
+  echo "Send work: tmux-send('$lock_name'). Wait: semaphore_wait('$lock_name')."
 
   if [[ -n "$context_lock_name" ]]; then
     echo "Context alert lock: '$context_lock_name' (releases when context >= ${context_alert}%)"
