@@ -17,7 +17,8 @@
   "pi": {
     "extensions": [
       "./extensions/tmux.ts",
-      "./extensions/supervisor.ts"
+      "./extensions/supervisor.ts",
+      "./extensions/handoff.ts"
     ]
   },
   "devDependencies": {

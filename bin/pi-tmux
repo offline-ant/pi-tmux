@@ -696,6 +696,59 @@ cmd_list() {
   tmux list-panes -a -F '#{pane_id} #{session_name}:#{window_index}.#{pane_index} #{pane_current_command}'
 }
 
+cmd_clear_stale() {
+  require_tmux
+  ensure_lock_dir
+
+  # Get all live pane IDs
+  local live_panes
+  live_panes="$(tmux list-panes -a -F '#{pane_id}' 2>/dev/null || true)"
+
+  local cleaned=0
+  local lock_file pane_id name basename_f
+
+  # Scan all lock and idle files in the semaphore dir
+  for lock_file in "$LOCK_DIR"/*; do
+    [[ -e "$lock_file" ]] || continue
+    basename_f="$(basename "$lock_file")"
+
+    # Read the pane id stored in the lock file
+    pane_id="$(head -n 1 "$lock_file" 2>/dev/null || true)"
+    [[ -n "$pane_id" && "$pane_id" == %* ]] || continue
+
+    # Check if this pane is still alive
+    if echo "$live_panes" | grep -qxF "$pane_id"; then
+      continue
+    fi
+
+    # Dead pane — clean up
+    rm -f -- "$lock_file"
+
+    # Strip idle: prefix for state cleanup
+    if [[ "$basename_f" == "$IDLE_PREFIX"* ]]; then
+      name="${basename_f#"$IDLE_PREFIX"}"
+    else
+      name="$basename_f"
+    fi
+
+    # Clean up associated watch locks, streams, coding-agent state
+    cleanup_watch_state "$name" 2>/dev/null || true
+    clear_coding_agent_state "$name" 2>/dev/null || true
+
+    # Clean up context alert lock
+    rm -f -- "$(lock_path "${name}:context")" 2>/dev/null || true
+
+    echo "Cleaned: $basename_f (pane $pane_id dead)"
+    cleaned=$((cleaned + 1))
+  done
+
+  if [[ $cleaned -eq 0 ]]; then
+    echo "No stale locks found."
+  else
+    echo "Cleaned $cleaned stale lock(s)."
+  fi
+}
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -706,6 +759,7 @@ Usage:
   pi-tmux watch <lock-name> <pattern>
   pi-tmux coding-agent <lock-name> <folder> [pi args...]
   pi-tmux list
+  pi-tmux clear-stale
 EOF
 }
 
@@ -721,6 +775,7 @@ main() {
     watch) cmd_watch "$@" ;;
     coding-agent) cmd_coding_agent "$@" ;;
     list) cmd_list "$@" ;;
+    clear-stale) cmd_clear_stale "$@" ;;
     -h|--help|help|"") usage ;;
     *)
       echo "error: unknown command: $cmd" >&2

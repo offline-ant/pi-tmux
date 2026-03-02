@@ -3,80 +3,21 @@
  *
  * Usage:  /supervise <task description>
  *
- * Creates ./dev/scratch/<id>/task.md with the task and guidance, then tells the
- * current agent to spawn a 'main' agent and keep it from going dormant.
+ * Tells the current agent to spawn a 'main' coding agent and keep it on track.
  */
 
-import * as fs from "node:fs";
-import * as path from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-
-const ID_CHARS =
-  "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-
-function randomId(): string {
-  return (
-    ID_CHARS[Math.floor(Math.random() * ID_CHARS.length)] +
-    ID_CHARS[Math.floor(Math.random() * ID_CHARS.length)]
-  );
-}
-
-function uniqueId(baseDir: string): string {
-  for (let i = 0; i < 100; i++) {
-    const id = randomId();
-    if (!fs.existsSync(path.join(baseDir, id))) return id;
-  }
-  throw new Error("Failed to find a unique .dev/ id after 100 attempts");
-}
 
 export default function (pi: ExtensionAPI) {
   pi.registerCommand("supervise", {
     description:
       "Spawn a supervised tmux coding agent. Usage: /supervise <task>",
-    handler: async (args, ctx) => {
+    handler: async (args, _ctx) => {
       const task = (args ?? "").trim();
 
-      const devBase = path.join(process.cwd(), "dev", "scratch");
-      const id = uniqueId(devBase);
-      const devDir = path.join(devBase, id);
-      const taskFile = path.join(devDir, "task.md");
-
-      fs.mkdirSync(devDir, { recursive: true });
-      fs.writeFileSync(
-        taskFile,
-        `
-${task || "(supervisor will fill this in from the conversation)"}
-
-You are the lead agent. Use tmux coding agents — have them write files to ./dev/scratch/${id}.
-
-**Priority: architectural quality over speed.** You have the power to spawn
-sub-agents. Use that power to investigate properly, explore alternatives, and
-build a well-structured solution. Dependencies are not automatically correct —
-we can vendor, replace, or change APIs if that's the right thing to do. Do not
-rush to the quickest fix — take the time to get the design right.
-
-Follow this general outline — but tweak it for your needs:
-
-\`\`\`
-parallel investigate;
-while plan.incomplete {
-    plan;
-    review;
-};
-parallel execute;
-\`\`\`
-
-Do not stop until the task is complete.
-When your context is >78% full, write down your status and start a sibling tmux-coding-agent
-that continues your work, then stop.`,
-      );
-
-      const relPath = path.join(devDir, "task.md");
-      ctx.ui.notify(`Task written to ${relPath}`, "info");
-
       const supervisorMessage = task
-        ? `read '${relPath}' — spawn a tmux-coding-agent named 'main' to do this task.`
-        : `Write our discussed plan to '${relPath}' (task summary, steps, key decisions), then spawn a tmux-coding-agent named 'main' to execute it.`;
+        ? `Spawn a tmux-coding-agent named 'main' to: ${task}`
+        : `Spawn a tmux-coding-agent named 'main' to execute the plan we just discussed.`;
 
       pi.sendUserMessage(
         `${supervisorMessage} Your jobs as supervisor:

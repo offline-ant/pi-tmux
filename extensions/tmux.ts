@@ -265,6 +265,15 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("clear-stale", {
+    description: "Clean up semaphore lock files and state for dead tmux panes",
+    handler: async (_args, ctx) => {
+      const result = await runTmux(pi, ["clear-stale"]);
+      const text = outputText(result.stdout, result.stderr);
+      ctx.ui.notify(text, result.code === 0 ? "info" : "error");
+    },
+  });
+
   pi.registerCommand("tmux-list", {
     description: "List active tmux panes",
     handler: async (_args, ctx) => {
