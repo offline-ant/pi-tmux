@@ -365,7 +365,19 @@ cmd_capture() {
   pane="$(resolve_pane "$target")"
 
   local output
-  output="$(tmux capture-pane -t "$pane" -p -S "-${lines}")"
+  # tmux line numbering: 0 = first visible line, negative = scrollback.
+  # cursor_y = current cursor position on visible screen (0-indexed).
+  # To get last N lines of content: start at (cursor_y - N + 1), end at cursor_y.
+  # For scrollback, start can go negative (up to -history_size).
+  local hist_size cursor_y start_line
+  hist_size="$(tmux display-message -p -t "$pane" '#{history_size}')"
+  cursor_y="$(tmux display-message -p -t "$pane" '#{cursor_y}')"
+  start_line=$(( cursor_y - lines + 1 ))
+  # Clamp to available scrollback
+  if (( start_line < -hist_size )); then
+    start_line=$(( -hist_size ))
+  fi
+  output="$(tmux capture-pane -t "$pane" -p -S "${start_line}" -E "${cursor_y}")"
 
   # Match previous TS behavior: strip startup controls block and [Extensions] block.
   output="$(printf '%s\n' "$output" | strip_startup_help)"
@@ -691,6 +703,21 @@ WATCHER_EOF
   echo "semaphore_wait on lock '$watch_lock' to be notified."
 }
 
+cmd_line_count() {
+  require_tmux
+
+  local target="${1:-}"
+  [[ -n "$target" ]] || { echo "error: line-count requires <lock-name|pane-id>" >&2; return 1; }
+
+  local pane
+  pane="$(resolve_pane "$target")"
+
+  local hist cursor
+  hist="$(tmux display-message -p -t "$pane" '#{history_size}')"
+  cursor="$(tmux display-message -p -t "$pane" '#{cursor_y}')"
+  echo $(( hist + cursor + 1 ))
+}
+
 cmd_list() {
   require_tmux
   tmux list-panes -a -F '#{pane_id} #{session_name}:#{window_index}.#{pane_index} #{pane_current_command}'
@@ -774,6 +801,7 @@ main() {
     kill) cmd_kill "$@" ;;
     watch) cmd_watch "$@" ;;
     coding-agent) cmd_coding_agent "$@" ;;
+    line-count) cmd_line_count "$@" ;;
     list) cmd_list "$@" ;;
     clear-stale) cmd_clear_stale "$@" ;;
     -h|--help|help|"") usage ;;

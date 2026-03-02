@@ -10,6 +10,11 @@ import { Type, type Static } from "@sinclair/typebox";
 
 const TMUX_SCRIPT = path.resolve(__dirname, "../bin/pi-tmux");
 
+/** Per-pane state for new-only capture */
+const captureState = new Map<string, number>(); // name -> totalLines at last capture
+
+const DEFAULT_MAX_NEW = 500;
+
 function isTmuxAvailable(): boolean {
   return !!process.env.TMUX;
 }
@@ -136,19 +141,145 @@ export default function (pi: ExtensionAPI) {
     name: "tmux-capture",
     label: "Tmux Capture",
     description:
-      "Capture output from a tmux pane by lock name or pane id.",
+      "Capture output from a tmux pane by lock name or pane id. By default, returns only new lines since the last capture (up to 500). Pass lines: <number> to get the last N lines regardless.",
     parameters: tmuxCaptureParams,
     async execute(_toolCallId, params, signal) {
-      const args = ["capture", params.name, String(params.lines ?? 500)];
-      const result = await runTmux(pi, args, signal);
-      let text = outputText(result.stdout, result.stderr);
+      const explicitLines = params.lines;
+      const maxLines = explicitLines ?? DEFAULT_MAX_NEW;
+      const stateKey = params.name;
 
-      if (result.code !== 0) {
-        return {
-          content: [{ type: "text", text }],
-          details: { code: result.code, args },
-          isError: true,
-        };
+      let text: string;
+      let resultCode: number;
+      let resultArgs: string[];
+
+      /** Helper: get current line count from tmux */
+      const getLineCount = async () => {
+        const r = await runTmux(pi, ["line-count", params.name], signal);
+        if (r.code !== 0) return undefined;
+        const n = parseInt(r.stdout.trim(), 10);
+        return isNaN(n) ? undefined : n;
+      };
+
+      /** Helper: do a normal capture of N lines */
+      const doCapture = async (n: number) => {
+        const args = ["capture", params.name, String(n)];
+        const r = await runTmux(pi, args, signal);
+        return { args, result: r };
+      };
+
+      /** Helper: update stored line count */
+      const updateState = async () => {
+        const lc = await getLineCount();
+        if (lc !== undefined) captureState.set(stateKey, lc);
+      };
+
+      if (explicitLines !== undefined) {
+        // Explicit lines: old behavior, return last N lines
+        const { args, result } = await doCapture(explicitLines);
+        resultArgs = args;
+        text = outputText(result.stdout, result.stderr);
+        resultCode = result.code;
+
+        if (resultCode !== 0) {
+          return {
+            content: [{ type: "text", text }],
+            details: { code: resultCode, args: resultArgs },
+            isError: true,
+          };
+        }
+
+        await updateState();
+      } else {
+        // New-only mode (default)
+        const currentTotal = await getLineCount();
+
+        if (currentTotal === undefined) {
+          // Can't get line count — fallback to normal capture
+          const { args, result } = await doCapture(maxLines);
+          resultArgs = args;
+          text = outputText(result.stdout, result.stderr);
+          resultCode = result.code;
+
+          if (resultCode !== 0) {
+            return {
+              content: [{ type: "text", text }],
+              details: { code: resultCode, args: resultArgs },
+              isError: true,
+            };
+          }
+        } else {
+          const prev = captureState.get(stateKey);
+
+          if (prev === undefined || currentTotal < prev) {
+            // No prior state or pane was reset — full capture
+            const { args, result } = await doCapture(maxLines);
+            resultArgs = args;
+            text = outputText(result.stdout, result.stderr);
+            resultCode = result.code;
+
+            if (resultCode !== 0) {
+              return {
+                content: [{ type: "text", text }],
+                details: { code: resultCode, args: resultArgs },
+                isError: true,
+              };
+            }
+          } else {
+            const delta = currentTotal - prev;
+
+            if (delta === 0) {
+              text = "(no new output)";
+              resultCode = 0;
+              resultArgs = ["line-count", params.name];
+
+              // Still set up watch if requested, then return
+              let watchLock: string | undefined;
+              if (params.watch) {
+                const watchArgs = ["watch", params.name, params.watch];
+                const watchResult = await runTmux(pi, watchArgs, signal);
+                const watchText = watchResult.stdout.trim();
+                if (watchResult.code !== 0) {
+                  text += `\n\n⚠️ Watch setup failed: ${outputText(watchResult.stdout, watchResult.stderr)}`;
+                } else {
+                  const match = watchText.match(/lock '([^']+)'/);
+                  watchLock = match?.[1];
+                  text += `\n\n${watchText}`;
+                }
+              }
+
+              return {
+                content: [{ type: "text", text }],
+                details: { code: resultCode, args: resultArgs, watchLock },
+              };
+            }
+
+            // Capture exactly the new lines (capped at maxLines)
+            const captureLines = Math.min(delta, maxLines);
+            const { args, result } = await doCapture(captureLines);
+            resultArgs = args;
+            resultCode = result.code;
+
+            if (resultCode !== 0) {
+              text = outputText(result.stdout, result.stderr);
+              return {
+                content: [{ type: "text", text }],
+                details: { code: resultCode, args: resultArgs },
+                isError: true,
+              };
+            }
+
+            if (delta > maxLines) {
+              text = `⚠️ ${delta} new lines, showing last ${maxLines}. Use lines: ${delta} to see all.\n\n${outputText(result.stdout, result.stderr)}`;
+            } else {
+              text = outputText(result.stdout, result.stderr);
+            }
+
+            if (!text) text = "(no new output)";
+            resultCode = 0;
+          }
+        }
+
+        await updateState();
       }
 
       // Set up a watch if requested
@@ -170,7 +301,7 @@ export default function (pi: ExtensionAPI) {
 
       return {
         content: [{ type: "text", text }],
-        details: { code: result.code, args, watchLock },
+        details: { code: resultCode, args: resultArgs!, watchLock },
       };
     },
   });
@@ -212,6 +343,7 @@ export default function (pi: ExtensionAPI) {
     description: "Kill a tmux pane by lock name or pane id.",
     parameters: tmuxKillParams,
     async execute(_toolCallId, params, signal) {
+      captureState.delete(params.name);
       const args = ["kill", params.name];
       const result = await runTmux(pi, args, signal);
       const text = outputText(result.stdout, result.stderr);
