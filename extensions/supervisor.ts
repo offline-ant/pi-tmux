@@ -6,30 +6,38 @@
  * Tells the current agent to spawn a 'main' coding agent and keep it on track.
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
   pi.registerCommand("supervise", {
     description:
       "Spawn a supervised tmux coding agent. Usage: /supervise <task>",
-    handler: async (args, _ctx) => {
+    handler: async (args, ctx) => {
       const task = (args ?? "").trim();
 
       const supervisorMessage = task
         ? `Spawn a tmux-coding-agent named 'main' to: ${task}`
-        : `Spawn a tmux-coding-agent named 'main' to execute the plan we just discussed.`;
+        : `Spawn a tmux-coding-agent named 'main' to execute the plan we just discussed in phases in serial`;
 
-      pi.sendUserMessage(
-        `${supervisorMessage} Your jobs as supervisor:
+      const message = `${supervisorMessage} Your jobs as supervisor:
 1. Observe the main agent and prevent it from going dormant.
-2. Ensure it follows the >78% context rule.
+2. Ensure it stays below 78% context use. If it exceeds it ask it to write a handoff.md and spawn a new agent to continue its work.
 3. **Ensure architectural quality** — if the main agent is rushing to a quick fix instead of building a well-structured solution, nudge it to slow down, investigate alternatives, and get the design right. Dependencies are not automatically correct — vendoring, replacing, or changing APIs is on the table if it's the right call. That's the whole point of this supervised workflow.
 4. **Ensure the main agent commits** — when the task is complete, make sure the main agent commits its work before stopping.
 
 Do NOT tell the main agent it has a supervisor.
 
-If you see text appearing in your input buffer (partially typed text), it likely means the user is typing a message to you directly. Just do a semaphore_wait to block and let them finish typing and submit their message.`,
-      );
+You may decide to pause when a major unforseen blocker or design choice is uncovered.
+
+You are done when all phases of the plan have been fully implemented, relevant specs & documents updated, and everything commited. 
+`;
+
+      if (ctx.isIdle()) {
+        pi.sendUserMessage(message);
+      } else {
+        pi.sendUserMessage(message, { deliverAs: "followUp" });
+        ctx.ui.notify("Queued /supervise message", "info");
+      }
     },
   });
 }

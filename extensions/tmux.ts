@@ -5,8 +5,8 @@
  */
 
 import * as path from "node:path";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { Type, type Static } from "@sinclair/typebox";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Type, type Static } from "typebox";
 
 const TMUX_SCRIPT = path.resolve(__dirname, "../bin/pi-tmux");
 
@@ -86,7 +86,7 @@ const tmuxCodingAgentParams = Type.Object({
   piArgs: Type.Optional(
     Type.String({
       description:
-        "Additional pi CLI arguments. To launch a codex agent, use '--provider openai-codex --model gpt-5.3-codex'. For thinking mode, use '--thinking high'.",
+        "Additional pi CLI arguments. Omit this to use pi's saved last active model; pass --provider/--model only to override.",
     }),
   ),
   contextAlertPercent: Type.Optional(
@@ -98,6 +98,17 @@ const tmuxCodingAgentParams = Type.Object({
   ),
 });
 export type TmuxCodingAgentInput = Static<typeof tmuxCodingAgentParams>;
+
+const minitaskParams = Type.Object({
+  questions: Type.Array(
+    Type.String({ minLength: 1, description: "Question or small task to answer with pi -p" }),
+    {
+      minItems: 1,
+      description: "Independent questions/tasks to solve in serial with pi -p.",
+    },
+  ),
+});
+export type MinitaskInput = Static<typeof minitaskParams>;
 
 export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
@@ -123,11 +134,7 @@ export default function (pi: ExtensionAPI) {
       const text = outputText(result.stdout, result.stderr);
 
       if (result.code !== 0) {
-        return {
-          content: [{ type: "text", text: text }],
-          details: { code: result.code, args },
-          isError: true,
-        };
+        throw new Error(text);
       }
 
       return {
@@ -181,11 +188,7 @@ export default function (pi: ExtensionAPI) {
         resultCode = result.code;
 
         if (resultCode !== 0) {
-          return {
-            content: [{ type: "text", text }],
-            details: { code: resultCode, args: resultArgs },
-            isError: true,
-          };
+          throw new Error(text);
         }
 
         await updateState();
@@ -201,11 +204,7 @@ export default function (pi: ExtensionAPI) {
           resultCode = result.code;
 
           if (resultCode !== 0) {
-            return {
-              content: [{ type: "text", text }],
-              details: { code: resultCode, args: resultArgs },
-              isError: true,
-            };
+            throw new Error(text);
           }
         } else {
           const prev = captureState.get(stateKey);
@@ -218,11 +217,7 @@ export default function (pi: ExtensionAPI) {
             resultCode = result.code;
 
             if (resultCode !== 0) {
-              return {
-                content: [{ type: "text", text }],
-                details: { code: resultCode, args: resultArgs },
-                isError: true,
-              };
+              throw new Error(text);
             }
           } else {
             const delta = currentTotal - prev;
@@ -261,11 +256,7 @@ export default function (pi: ExtensionAPI) {
 
             if (resultCode !== 0) {
               text = outputText(result.stdout, result.stderr);
-              return {
-                content: [{ type: "text", text }],
-                details: { code: resultCode, args: resultArgs },
-                isError: true,
-              };
+              throw new Error(text);
             }
 
             if (delta > maxLines) {
@@ -323,11 +314,7 @@ export default function (pi: ExtensionAPI) {
       const text = outputText(result.stdout, result.stderr);
 
       if (result.code !== 0) {
-        return {
-          content: [{ type: "text", text }],
-          details: { code: result.code, args },
-          isError: true,
-        };
+        throw new Error(text);
       }
 
       return {
@@ -349,11 +336,7 @@ export default function (pi: ExtensionAPI) {
       const text = outputText(result.stdout, result.stderr);
 
       if (result.code !== 0) {
-        return {
-          content: [{ type: "text", text }],
-          details: { code: result.code, args },
-          isError: true,
-        };
+        throw new Error(text);
       }
 
       return {
@@ -383,16 +366,90 @@ export default function (pi: ExtensionAPI) {
       const text = outputText(result.stdout, result.stderr);
 
       if (result.code !== 0) {
-        return {
-          content: [{ type: "text", text }],
-          details: { code: result.code, args },
-          isError: true,
-        };
+        throw new Error(text);
       }
 
       return {
         content: [{ type: "text", text }],
         details: { code: result.code, args },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "minitask",
+    label: "Minitask",
+    description:
+      "Run independent tasks or ask questions about this project or environment.",
+    parameters: minitaskParams,
+    renderCall(args) {
+      const payload = JSON.stringify(args.questions, null, 2);
+      const lines = ["minitask(", ...payload.split("\n").map((line) => `  ${line}`), ")"];
+
+      return {
+        render: (_contentWidth: number) => lines,
+        invalidate: () => {
+          /* no-op */
+        },
+      };
+    },
+    async execute(_toolCallId, params, signal, onUpdate, ctx) {
+      const results: Array<{ question: string; answer: string; exitCode: number }> = [];
+
+      for (const question of params.questions) {
+        let answer = "(no output)";
+        let exitCode = 0;
+
+        try {
+          const result = await pi.exec("pi", ["-p", question], {
+            signal,
+            cwd: ctx.cwd,
+          });
+
+          exitCode = result.code;
+          answer = outputText(result.stdout, result.stderr);
+          if (exitCode !== 0) {
+            answer = `(exit code ${exitCode}) ${answer}`;
+          }
+        } catch (err) {
+          if (err instanceof Error && err.name === "AbortError") {
+            throw err;
+          }
+
+          answer = `Error: ${err instanceof Error ? err.message : String(err)}`;
+          exitCode = 1;
+        }
+
+        results.push({ question, answer, exitCode });
+
+        if (onUpdate) {
+          onUpdate({
+            content: [
+              {
+                type: "text",
+                text: results
+                  .map((item) => `<question> ${item.question} </question><answer> ${item.answer} </answer>`)
+                  .join("\n"),
+              },
+            ],
+            details: {
+              questionsCount: params.questions.length,
+              results,
+            },
+          });
+        }
+      }
+
+      const text = results
+        .map((item) => `<question> ${item.question} </question><answer> ${item.answer} </answer>`)
+        .join("\n");
+
+      return {
+        content: [{ type: "text", text }],
+        details: {
+          questionsCount: results.length,
+          results,
+        },
       };
     },
   });

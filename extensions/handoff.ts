@@ -10,7 +10,7 @@
  */
 
 import * as path from "node:path";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 type Mode = "off" | "handoff" | "whip";
 const MODES: Mode[] = ["off", "handoff", "whip"];
@@ -59,7 +59,7 @@ export default function (pi: ExtensionAPI) {
 			const usage = ctx.getContextUsage();
 			if (usage && usage.percent !== null && usage.percent >= 88) {
 				handoffTriggered = true;
-				ctx.ui.notify(`Context at ${Math.round(usage.percent)}% — triggering handoff`, "warn");
+				ctx.ui.notify(`Context at ${Math.round(usage.percent)}% — triggering handoff`, "warning");
 
 				pi.sendUserMessage(
 					`CRITICAL: Your context is at ${Math.round(usage.percent)}%. You must hand off NOW.
@@ -84,7 +84,7 @@ Do NOT skip any of these steps. The sibling agent must be able to pick up exactl
 		if (mode === "whip") {
 			const lockName = process.env.PI_LOCK_NAME;
 			if (!lockName) {
-				ctx.ui.notify("WHIP: not running in a tmux pane (no PI_LOCK_NAME), skipping", "warn");
+				ctx.ui.notify("WHIP: not running in a tmux pane (no PI_LOCK_NAME), skipping", "warning");
 				return;
 			}
 

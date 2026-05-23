@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+BUILD_PROMPT_SCRIPT="${SCRIPT_DIR}/build-claude-append-prompt.mjs"
+SEMAPHORE_SCRIPT="${SCRIPT_DIR}/../../pi-semaphore/bin/pi-semaphore"
+
+lock_name="${PI_LOCK_NAME:-$(basename "${PWD:-.}")}" 
+model="${PI_CLAUDE_MODEL:-opus}"
+claude_args_raw="${PI_CLAUDE_ARGS:-}"
+pi_cli_path="${PI_CLI_PATH:-}"
+
+tmp_dir="$(mktemp -d /tmp/pi-claude-agent.XXXXXX)"
+prompt_file="${tmp_dir}/append-prompt.txt"
+session_id="$(cat /proc/sys/kernel/random/uuid)"
+turn_count=0
+active_turn=0
+
+cleanup() {
+  if (( active_turn )) && [[ -x "$SEMAPHORE_SCRIPT" ]]; then
+    "$SEMAPHORE_SCRIPT" agent-end "$lock_name" >/dev/null 2>&1 || true
+  fi
+
+  rm -rf -- "$tmp_dir"
+}
+trap cleanup EXIT
+
+if ! command -v claude >/dev/null 2>&1; then
+  echo "error: claude CLI not found in PATH" >&2
+  exit 127
+fi
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "error: node not found in PATH" >&2
+  exit 127
+fi
+
+if [[ -z "$pi_cli_path" ]]; then
+  echo "error: PI_CLI_PATH is not set" >&2
+  exit 1
+fi
+
+PI_CLI_PATH="$pi_cli_path" node "$BUILD_PROMPT_SCRIPT" "$PWD" > "$prompt_file"
+append_prompt="$(<"$prompt_file")"
+
+if [[ -z "$append_prompt" ]]; then
+  echo "error: generated append prompt is empty" >&2
+  exit 1
+fi
+
+parse_claude_args() {
+  EXTRA_CLAUDE_ARGS=()
+  if [[ -z "$claude_args_raw" ]]; then
+    return
+  fi
+
+  # shellcheck disable=SC2034,SC2206,SC2294
+  local parsed_args=()
+  # shellcheck disable=SC2206
+  eval "parsed_args=( ${claude_args_raw} )"
+  EXTRA_CLAUDE_ARGS=("${parsed_args[@]}")
+}
+
+set_idle() {
+  if [[ -x "$SEMAPHORE_SCRIPT" ]]; then
+    "$SEMAPHORE_SCRIPT" agent-end "$lock_name" >/dev/null 2>&1 || true
+  fi
+  active_turn=0
+}
+
+set_active() {
+  if [[ -x "$SEMAPHORE_SCRIPT" ]]; then
+    "$SEMAPHORE_SCRIPT" agent-start "$lock_name" >/dev/null 2>&1 || true
+  fi
+  active_turn=1
+}
+
+parse_claude_args
+set_idle
+
+echo "pi-claude-agent ready"
+echo "model: $model"
+echo "cwd: $PWD"
+echo "session: $session_id"
+echo "append prompt: $prompt_file"
+echo "special commands: /exit, /session, /prompt-path"
+echo
+printf 'pi-claude-agent> '
+
+while IFS= read -r input; do
+  if [[ -z "${input//[[:space:]]/}" ]]; then
+    printf 'pi-claude-agent> '
+    continue
+  fi
+
+  set_active
+
+  case "$input" in
+    /exit|exit|/quit|quit)
+      echo
+      echo "Exiting pi-claude-agent."
+      break
+      ;;
+    /session)
+      echo
+      echo "session: $session_id"
+      echo
+      set_idle
+      printf 'pi-claude-agent> '
+      continue
+      ;;
+    /prompt-path)
+      echo
+      echo "append prompt: $prompt_file"
+      echo
+      set_idle
+      printf 'pi-claude-agent> '
+      continue
+      ;;
+  esac
+
+  echo
+  echo "--- turn $((turn_count + 1)) ---"
+
+  claude_cmd=(claude)
+  if [[ ${#EXTRA_CLAUDE_ARGS[@]} -gt 0 ]]; then
+    claude_cmd+=("${EXTRA_CLAUDE_ARGS[@]}")
+  fi
+  claude_cmd+=(
+    -p
+    --model "$model"
+    --permission-mode bypassPermissions
+    --append-system-prompt "$append_prompt"
+  )
+
+  if (( turn_count == 0 )); then
+    claude_cmd+=(--session-id "$session_id")
+  else
+    claude_cmd+=(--resume "$session_id")
+  fi
+
+  claude_cmd+=("$input")
+
+  set +e
+  "${claude_cmd[@]}"
+  claude_status=$?
+  set -e
+
+  set_idle
+  turn_count=$((turn_count + 1))
+
+  echo
+  if (( claude_status == 0 )); then
+    echo "--- turn $turn_count complete ---"
+  else
+    echo "--- turn $turn_count failed (exit $claude_status) ---"
+  fi
+  echo
+  printf 'pi-claude-agent> '
+done

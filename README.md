@@ -29,6 +29,7 @@ pi -e git:github.com/offline-ant/pi-tmux
 | `tmux-send` | Send text or keys to a pane by lock name or pane id; for coordinated workflows, pair with `semaphore_wait` on the same lock name (unless the command launches a nested pi, then wait on the inner lock) |
 | `tmux-kill` | Kill a pane by lock name or pane id |
 | `tmux-coding-agent` | Spawn a pi coding agent in a pane and return startup output |
+| `minitask` | Run multiple independent questions/tasks through `pi -p` in serial and return `<question>/<answer>` blocks |
 
 ## Lock + Pane Mapping
 
@@ -52,6 +53,14 @@ Spawn a coding agent:
 1. `tmux-coding-agent` with name `reviewer`, folder `../project`
 2. `tmux-send` with name `reviewer` and text `analyze lint failures`
 3. `semaphore_wait` with name `reviewer`
+
+`tmux-coding-agent` runs `pi` without model arguments unless `piArgs` is set, so it uses pi's saved last active model by default. Pass `--provider`/`--model` in `piArgs` only when you want to override that selection.
+
+Run independent quick tasks:
+
+1. `minitask` with `questions: ["What is module X?", "Give a one-line status of task Y"]`
+2. Read `<question>...</question><answer>...</answer>` blocks from output
+
 
 ## Safety Policy
 
